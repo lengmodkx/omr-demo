@@ -1,9 +1,9 @@
-"""Redis Stream 批量任务消费者"""
+"""Redis Stream 批量任务消费者（Phase 3：背压 + 单任务 + 重试）"""
 import json
 import logging
 import threading
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import redis
 
@@ -37,6 +37,8 @@ class MqConsumer:
         self._handler: Optional[BatchJobHandler] = None
         self._thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
+        self._inflight_lock = threading.Lock()
+        self._inflight = 0
 
     def start(self):
         """在独立线程中启动消费者"""
@@ -46,6 +48,16 @@ class MqConsumer:
 
     def stop(self):
         self._stop_event.set()
+        # 等待 inflight 任务完成（最多 30 秒）
+        deadline = time.time() + 30
+        while time.time() < deadline:
+            with self._inflight_lock:
+                if self._inflight <= 0:
+                    break
+            time.sleep(0.2)
+        with self._inflight_lock:
+            if self._inflight > 0:
+                logger.warning("停止时仍有 %d 个 inflight 任务未完成", self._inflight)
         if self._client:
             try:
                 self._client.close()
@@ -80,19 +92,22 @@ class MqConsumer:
 
             while not self._stop_event.is_set():
                 try:
-                    # 阻塞读取，超时 2 秒
+                    # 1. 先尝试处理本消费者遗留的 pending 消息（失败重试）
+                    self._process_pending(r)
+                    # 2. 读取新消息，受 omr_max_inflight 背压限制
+                    self._wait_inflight_slot()
+                    batch_size = max(1, self.cfg.omr_batch_size)
                     msgs = r.xreadgroup(
                         groupname=self.cfg.redis_consumer_group,
                         consumername=self.cfg.redis_consumer_name,
                         streams={self.cfg.redis_job_stream: ">"},
-                        count=1,
+                        count=batch_size,
                         block=2000,
                     )
                     if not msgs:
                         continue
                     for stream_name, entries in msgs:
-                        for msg_id, fields in entries:
-                            self._process_message(r, msg_id, fields)
+                        self._process_batch(r, entries)
                 except redis.ConnectionError as e:
                     logger.error("Redis 连接断开: %s", e)
                     self._stop_event.wait(5)
@@ -103,18 +118,107 @@ class MqConsumer:
             if not self._stop_event.is_set():
                 logger.error("Redis Consumer 启动失败: %s", e)
 
-    def _process_message(self, r, msg_id: str, fields: Dict[str, str]):
+    def _wait_inflight_slot(self):
+        """背压：等待 inflight 数量低于阈值"""
+        while not self._stop_event.is_set():
+            with self._inflight_lock:
+                if self._inflight < self.cfg.omr_max_inflight:
+                    return
+            time.sleep(0.1)
+
+    def _process_pending(self, r):
+        """处理 pending 消息（未确认的旧消息）"""
         try:
-            payload_str = fields.get("payload", "{}")
-            job: Dict[str, Any] = json.loads(payload_str)
-            logger.info("[mq] 收到任务: %s", job.get("job_id"))
-            self._handler.handle(job)
-            r.xack(self.cfg.redis_job_stream, self.cfg.redis_consumer_group, msg_id)
-            r.xdel(self.cfg.redis_job_stream, msg_id)
-        except json.JSONDecodeError as e:
-            logger.error("[mq] 任务消息 JSON 解析失败: %s", e)
+            pending = r.xpending_range(
+                self.cfg.redis_job_stream,
+                self.cfg.redis_consumer_group,
+                min="-",
+                max="+",
+                count=1,
+                consumername=self.cfg.redis_consumer_name,
+            )
+            if not pending:
+                return
+            # 只处理空闲超过 5 秒的消息，避免与当前正在处理的消息冲突
+            msg_id = pending[0]["message_id"]
+            idle_ms = pending[0].get("time_since_delivered", 0)
+            if idle_ms < 5000:
+                return
+            msgs = r.xreadgroup(
+                groupname=self.cfg.redis_consumer_group,
+                consumername=self.cfg.redis_consumer_name,
+                streams={self.cfg.redis_job_stream: msg_id},
+                count=1,
+                block=1000,
+            )
+            if msgs:
+                for stream_name, entries in msgs:
+                    self._process_batch(r, entries)
+        except Exception as e:
+            logger.warning("处理 pending 消息失败: %s", e)
+
+    def _process_batch(
+        self,
+        r,
+        entries: List[Tuple[str, Dict[str, str]]],
+    ):
+        """并发处理一批消息，成功则 ack，失败保留 pending"""
+        jobs: List[Tuple[str, Dict[str, Any]]] = []
+        for msg_id, fields in entries:
+            try:
+                payload_str = fields.get("payload", "{}")
+                job: Dict[str, Any] = json.loads(payload_str)
+                jobs.append((msg_id, job))
+            except json.JSONDecodeError as e:
+                logger.error("[mq] 任务消息 JSON 解析失败: %s", e)
+                self._ack(r, msg_id)
+
+        if not jobs:
+            return
+
+        # 控制并发：同时最多 omr_max_inflight 个；通过 done_callback 递减 inflight
+        futures = []
+        for msg_id, job in jobs:
+            self._wait_inflight_slot()
+            with self._inflight_lock:
+                self._inflight += 1
+            try:
+                future = self.worker_pool.submit(self._handle_one, msg_id, job)
+            except Exception as exc:
+                # submit 失败（如线程池已关闭）必须释放 inflight，否则计数泄漏
+                logger.error("[mq] 提交任务到线程池失败: %s", exc)
+                self._decrement_inflight()
+                raise
+            future.add_done_callback(lambda _f: self._decrement_inflight())
+            futures.append((msg_id, future))
+
+        for msg_id, future in futures:
+            try:
+                success = future.result(timeout=self.cfg.omr_single_task_timeout_sec)
+                if success:
+                    self._ack(r, msg_id)
+                # 失败不 ack，保留 pending；job_handler 已负责重试/死信
+            except Exception as e:
+                logger.error("[mq] 任务执行异常或超时: %s", e)
+                # 超时也不 ack，等待 pending 重试
+
+    def _decrement_inflight(self):
+        with self._inflight_lock:
+            self._inflight = max(0, self._inflight - 1)
+
+    def _handle_one(self, msg_id: str, job: Dict[str, Any]) -> bool:
+        """在 worker 线程中处理单条任务"""
+        try:
+            logger.info("[mq] 收到任务: %s", job.get("task_id"))
+            result = self._handler.handle_single_task(job)
+            return result.get("success", False) or result.get("retrying", False)
+        except Exception as e:
+            logger.exception("[mq] 任务处理失败: %s", e)
+            return False
+
+    def _ack(self, r, msg_id: str):
+        try:
             r.xack(self.cfg.redis_job_stream, self.cfg.redis_consumer_group, msg_id)
             r.xdel(self.cfg.redis_job_stream, msg_id)
         except Exception as e:
-            logger.exception("[mq] 任务处理失败: %s", e)
-            # 不 ack，让消息保留在 pending list，后续可重试
+            logger.warning("确认消息失败 %s: %s", msg_id, e)
