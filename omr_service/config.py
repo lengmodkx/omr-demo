@@ -30,7 +30,7 @@ class OmrConfig:
     dubbo_port: int = 20884
 
     # HTTP 健康检查
-    health_port: int = 8080
+    health_port: int = 9173
 
     # Nacos 注册中心
     nacos_server: str = "127.0.0.1:8848"
@@ -61,11 +61,30 @@ class OmrConfig:
     image_timeout: int = 30
     max_image_bytes: int = 50 * 1024 * 1024
 
+    # 主观题裁剪输出
+    crop_output_dir: str = "./omr_crops"
+    crop_base_url: Optional[str] = None
+
+    # 个人信息 OCR 置信度阈值（低于此值返回空值，避免脏数据）
+    ocr_confidence_threshold: float = 0.3
+
     # 工作线程
     worker_count: int = field(default_factory=lambda: os.cpu_count() or 4)
 
+    # 批量任务 / MQ 背压
+    omr_max_inflight: int = 16
+    omr_batch_size: int = 1
+    omr_max_retry: int = 3
+    omr_retry_delay_sec: int = 1
+    omr_single_task_timeout_sec: int = 60
+
     # 服务元数据
-    service_version: str = "1.0.0"
+    # 留空字符串：与 Java 端 @DubboReference 默认 version="" 对齐。
+    # Dubbo 3 接口级服务发现对非空 version 严格匹配（metadata + Nacos 服务名两层都得对），
+    # 写 "1.0.0" 会让 consumer 找不到 provider（consumer 默认 version=""，服务名变成 providers:omr.OmrService:1.0.0:）。
+    service_version: str = ""
+    service_tag_enabled: bool = False
+    service_tag: str = field(default_factory=_get_local_ip)
     local_ip: str = field(default_factory=_get_local_ip)
 
     @property
@@ -94,9 +113,18 @@ class OmrConfig:
                     value = default
             return value
 
+        # 服务 Tag 开关：默认关闭走基线实例；本地调试隔离可开启（自动使用本机 IP 作为 tag）
+        tag_enabled = _get(
+            "service_tag_enabled",
+            "OMR_SERVICE_TAG_ENABLED",
+            False,
+            lambda x: str(x).lower() in ("true", "1", "yes"),
+        )
+        service_tag = "" if not tag_enabled else _get("service_tag", "OMR_SERVICE_TAG", _get_local_ip())
+
         return cls(
             dubbo_port=_get("dubbo_port", "OMR_DUBBO_PORT", 20884, int),
-            health_port=_get("health_port", "OMR_HEALTH_PORT", 8080, int),
+            health_port=_get("health_port", "OMR_HEALTH_PORT", 9173, int),
             nacos_server=_get("nacos_server", "NACOS_SERVER", "127.0.0.1:8848"),
             nacos_namespace=_get("nacos_namespace", "NACOS_NAMESPACE", "public"),
             nacos_username=_get("nacos_username", "NACOS_USERNAME", None) or None,
@@ -118,6 +146,19 @@ class OmrConfig:
             redis_consumer_name=_get("redis.consumer_name", "REDIS_CONSUMER_NAME", "consumer-1"),
             image_timeout=_get("image_timeout", "OMR_IMAGE_TIMEOUT", 30, int),
             max_image_bytes=_get("max_image_bytes", "OMR_MAX_IMAGE_BYTES", 50 * 1024 * 1024, int),
+            crop_output_dir=_get("crop_output_dir", "OMR_CROP_OUTPUT_DIR", "./omr_crops"),
+            crop_base_url=_get("crop_base_url", "OMR_CROP_BASE_URL", None) or None,
+            ocr_confidence_threshold=_get("ocr_confidence_threshold", "OMR_OCR_CONFIDENCE_THRESHOLD", 0.3, float),
             worker_count=_get("worker_count", "OMR_WORKER_COUNT", os.cpu_count() or 4, int),
-            service_version=_get("service_version", "OMR_SERVICE_VERSION", "1.0.0"),
+            omr_max_inflight=_get("omr_max_inflight", "OMR_MAX_INFLIGHT", 16, int),
+            omr_batch_size=_get("omr_batch_size", "OMR_BATCH_SIZE", 1, int),
+            omr_max_retry=_get("omr_max_retry", "OMR_MAX_RETRY", 3, int),
+            omr_retry_delay_sec=_get("omr_retry_delay_sec", "OMR_RETRY_DELAY_SEC", 1, int),
+            omr_single_task_timeout_sec=_get("omr_single_task_timeout_sec", "OMR_SINGLE_TASK_TIMEOUT_SEC", 60, int),
+            # service_version 默认改成空字符串：与 Java 端 @DubboReference 默认 version="" 对齐。
+            # Dubbo 3 接口级服务发现对非空 version 严格匹配（metadata + Nacos 服务名两层都得对），
+            # 默认 "1.0.0" 会让 consumer 找不到 provider（consumer 默认 version=""）。
+            service_version=_get("service_version", "OMR_SERVICE_VERSION", ""),
+            service_tag_enabled=tag_enabled,
+            service_tag=service_tag,
         )
