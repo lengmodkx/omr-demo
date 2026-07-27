@@ -15,7 +15,7 @@ class TestMetadata(unittest.TestCase):
         meta = reg._build_metadata()
         self.assertEqual(meta["side"], "provider")
         self.assertEqual(meta["protocol"], "tri")
-        self.assertIn("dubbo.endpoints", meta)
+        self.assertIn("service-name-mapping", meta)
 
     def test_build_metadata_interface(self):
         cfg = OmrConfig.from_env()
@@ -23,7 +23,24 @@ class TestMetadata(unittest.TestCase):
         meta = reg._build_metadata(interface=True)
         self.assertEqual(meta["interface"], "omr.OmrService")
         self.assertEqual(meta["version"], cfg.service_version)
-        self.assertIn("tri.service", meta)
+        self.assertIn("prefer.serialization", meta)
+
+    def test_build_metadata_tag_default_baseline(self):
+        cfg = OmrConfig.from_env()
+        cfg.service_tag = ""  # 显式置空，避免受本地 .env 影响
+        reg = NacosRegistrator(cfg)
+        meta = reg._build_metadata()
+        self.assertIn("tag", meta)
+        self.assertEqual(meta["tag"], "")
+        self.assertNotIn("dubbo.tag", meta)
+
+    def test_build_metadata_tag_with_value(self):
+        cfg = OmrConfig.from_env()
+        cfg.service_tag = "zhangsan"
+        reg = NacosRegistrator(cfg)
+        meta = reg._build_metadata()
+        self.assertEqual(meta["tag"], "zhangsan")
+        self.assertEqual(meta["dubbo.tag"], "zhangsan")
 
 
 class _SimpleParam:

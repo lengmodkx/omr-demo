@@ -7,7 +7,7 @@ import numpy as np
 
 from omr_service.config import OmrConfig
 from omr_service.loader.image_loader import ImageLoader
-from omr_service.loader.template_store import TemplateStore
+from omr_service.loader.template_store import CachedTemplate, TemplateStore
 from omr_service.rpc import omr_pb2, omr_pb2_grpc
 from omr_service.server import create_server
 from omr_service.worker.pool import WorkerPool
@@ -31,7 +31,7 @@ class TestRpcService(unittest.TestCase):
         from omr_service.engine.standard_template import StandardTemplate
         columns = [{"x1": 50, "y1": 50, "x2": 350, "y2": 250, "start_q": 1, "num_q": 2, "num_options": 4}]
         tpl = StandardTemplate(image=img, column_configs=columns)
-        cls.template_store.set(999, tpl)
+        cls.template_store.set(999, CachedTemplate(standard_template=tpl))
 
     @classmethod
     def tearDownClass(cls):

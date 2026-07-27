@@ -10,6 +10,14 @@ symbols the SDK actually needs (``a2a._base.A2ABaseModel`` and
 ``a2a.types.AgentCard``) before importing ``v2.nacos``. The AI client is not
 used by this service, so the stub has no runtime impact on naming/config
 functionality.
+
+Additionally, the stock SDK sends the Nacos login credentials as URL query
+parameters (``AuthClient.get_access_token``). Some networks drop connections
+whose query string carries a ``username`` + ``password`` pair (WAF / security
+middleboxes), which makes every login attempt time out with
+``Error [500]: get access token failed``. This module also monkey-patches the
+login call to send the credentials as a form-encoded POST body instead —
+the same request shape the official Nacos Java client uses.
 """
 from __future__ import annotations
 
@@ -70,9 +78,68 @@ def _patch_a2a_agent_card() -> None:
         logger.debug("Applied nacos-sdk-python a2a compatibility patch")
 
 
+async def _get_access_token_form_body(self: Any, force_refresh: bool = False) -> Any:
+    """Patched ``AuthClient.get_access_token`` using a form-encoded POST body.
+
+    Mirrors the SDK implementation but passes ``username``/``password`` in the
+    request body instead of the URL query string. Keeping credentials out of
+    the URL avoids middleboxes that hold/reset connections carrying credential
+    pairs in the query string, and prevents secrets from leaking into access
+    logs.
+    """
+    import json  # noqa: PLC0415
+    import time  # noqa: PLC0415
+
+    from v2.nacos.common.nacos_exception import NacosException, SERVER_ERROR  # noqa: PLC0415
+
+    current_time = time.time()
+    if self.access_token and not force_refresh and self.token_expired_time > current_time:
+        return self.access_token
+
+    form = {"username": self.username, "password": self.password}
+    headers = {"Content-Type": "application/x-www-form-urlencoded"}
+    ctx_prefix = self.client_config.build_context_prefix()
+    server_list = self.get_server_list()
+    for server_address in server_list:
+        url = server_address + ctx_prefix + "/v1/auth/users/login"
+        resp, error = await self.http_agent.request(url, "POST", headers, None, form)
+        if not resp or error:
+            self.logger.warning(f"[get-access-token] request {url} failed, error: {error}")
+            continue
+
+        response_data = json.loads(resp.decode("UTF-8"))
+        self.access_token = response_data.get('accessToken')
+        self.token_ttl = response_data.get('tokenTtl', 18000)  # 默认使用返回值，无返回则使用18000秒
+        self.token_expired_time = current_time + self.token_ttl - 10  # 更新 Token 的过期时间
+        self.logger.info(
+            f"[get_access_token] AccessToken obtained, TTL: {self.token_ttl}, force_refresh: {force_refresh}")
+        return self.access_token
+    raise NacosException(SERVER_ERROR, "get access token failed")
+
+
+_get_access_token_form_body._omr_form_login_patch = True  # type: ignore[attr-defined]
+
+
+def _patch_auth_client_form_login() -> None:
+    """Monkey-patch ``AuthClient.get_access_token`` to use a form POST body."""
+    from v2.nacos.transport.auth_client import AuthClient  # noqa: PLC0415
+
+    current = AuthClient.get_access_token
+    if getattr(current, "_omr_form_login_patch", False):
+        return
+    AuthClient.get_access_token = _get_access_token_form_body
+    logger.debug("Patched AuthClient.get_access_token to send credentials in POST body")
+
+
+def _apply_sdk_patches() -> None:
+    """Apply all runtime patches required before using ``v2.nacos``."""
+    _patch_a2a_agent_card()
+    _patch_auth_client_form_login()
+
+
 def import_v2_nacos() -> Any:
     """Import and return the ``v2.nacos`` module after applying the patch."""
-    _patch_a2a_agent_card()
+    _apply_sdk_patches()
     import v2.nacos as _nacos  # noqa: PLC0415
 
     return _nacos
@@ -80,7 +147,7 @@ def import_v2_nacos() -> Any:
 
 def import_naming_service() -> Any:
     """Import ``NacosNamingService`` after applying the patch."""
-    _patch_a2a_agent_card()
+    _apply_sdk_patches()
     from v2.nacos.naming.nacos_naming_service import NacosNamingService  # noqa: PLC0415
 
     return NacosNamingService
@@ -88,7 +155,7 @@ def import_naming_service() -> Any:
 
 def import_config_service() -> Any:
     """Import ``NacosConfigService`` after applying the patch."""
-    _patch_a2a_agent_card()
+    _apply_sdk_patches()
     from v2.nacos.config.nacos_config_service import NacosConfigService  # noqa: PLC0415
 
     return NacosConfigService
@@ -96,7 +163,7 @@ def import_config_service() -> Any:
 
 def import_client_config() -> Any:
     """Import ``ClientConfig`` after applying the patch."""
-    _patch_a2a_agent_card()
+    _apply_sdk_patches()
     from v2.nacos.common.client_config import ClientConfig  # noqa: PLC0415
 
     return ClientConfig
@@ -104,21 +171,28 @@ def import_client_config() -> Any:
 
 def import_register_instance_param() -> Any:
     """Import ``RegisterInstanceParam`` after applying the patch."""
-    _patch_a2a_agent_card()
+    _apply_sdk_patches()
     from v2.nacos.naming.model.naming_param import RegisterInstanceParam  # noqa: PLC0415
     return RegisterInstanceParam
 
 
 def import_deregister_instance_param() -> Any:
     """Import ``DeregisterInstanceParam`` after applying the patch."""
-    _patch_a2a_agent_card()
+    _apply_sdk_patches()
     from v2.nacos.naming.model.naming_param import DeregisterInstanceParam  # noqa: PLC0415
     return DeregisterInstanceParam
 
 
+def import_list_instance_param() -> Any:
+    """Import ``ListInstanceParam`` after applying the patch."""
+    _apply_sdk_patches()
+    from v2.nacos.naming.model.naming_param import ListInstanceParam  # noqa: PLC0415
+    return ListInstanceParam
+
+
 def import_config_param() -> Any:
     """Import ``ConfigParam`` after applying the patch."""
-    _patch_a2a_agent_card()
+    _apply_sdk_patches()
     from v2.nacos.config.model.config_param import ConfigParam  # noqa: PLC0415
     return ConfigParam
 

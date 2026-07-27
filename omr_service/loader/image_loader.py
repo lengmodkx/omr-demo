@@ -35,7 +35,7 @@ class ImageLoader:
             # 本地文件
             if os.path.exists(one_url):
                 try:
-                    img = cv2.imread(one_url, cv2.IMREAD_COLOR)
+                    img = self._load_local(one_url)
                     if img is not None:
                         return img
                 except Exception as exc:
@@ -72,7 +72,7 @@ class ImageLoader:
             img: Optional[np.ndarray] = None
             if os.path.exists(one_url):
                 try:
-                    img = cv2.imread(one_url, cv2.IMREAD_COLOR)
+                    img = self._load_local(one_url)
                 except Exception as exc:
                     logger.warning("本地图片读取异常 %s: %s", one_url, exc)
             elif one_url.startswith(("http://", "https://")):
@@ -115,6 +115,16 @@ class ImageLoader:
         arr = np.frombuffer(data, dtype=np.uint8)
         img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
         return img
+
+    @staticmethod
+    def _load_local(path: str) -> Optional[np.ndarray]:
+        """读取本地图片，支持中文路径（cv2.imread 对非 ASCII 路径不稳定）。"""
+        with open(path, "rb") as f:
+            data = f.read()
+        if not data:
+            return None
+        arr = np.frombuffer(data, dtype=np.uint8)
+        return cv2.imdecode(arr, cv2.IMREAD_COLOR)
 
     def close(self):
         self._session.close()

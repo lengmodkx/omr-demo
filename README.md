@@ -43,6 +43,7 @@ omr-service(Python) :20884
 ```bash
 python -m venv .venv
 source .venv/Scripts/activate  # Windows
+. .venv-py311/Scripts/Activate.ps1
 # source .venv/bin/activate    # Linux/macOS
 pip install -r requirements.txt
 ```
@@ -86,6 +87,12 @@ cp .env.example .env
 ```bash
 python -m omr_service.main
 ```
+
+## 接口文档
+
+完整 RPC 接口定义、字段说明、Java / Python 调用示例见：
+
+📄 [`docs/OMR服务接口文档.md`](docs/OMR服务接口文档.md)
 
 ## Java 端调用示例
 
@@ -163,6 +170,39 @@ python -m unittest discover -s tests -p "test_*.py" -v
 | `REDIS_JOB_STREAM` | `omr:batch:job` | 批量任务 Stream |
 | `REDIS_RESULT_STREAM` | `omr:batch:result` | 结果输出 Stream |
 | `OMR_WORKER_COUNT` | CPU 核数 | 并发 worker |
+| `OMR_SERVICE_TAG` | - | 服务实例 Tag，用于本地调试隔离（空值为基线实例） |
+
+## 本地调试隔离（Service Tag）
+
+多人共用同一 Nacos 注册中心时，为避免请求打到其他开发者的本地实例，可给实例打 Tag：
+
+```bash
+# 开发者 A 本地启动
+OMR_SERVICE_TAG=zhangsan python -m omr_service.main
+
+# 开发者 B 本地启动
+OMR_SERVICE_TAG=lisi python -m omr_service.main
+```
+
+Provider 注册时会在 Nacos metadata 中写入 `tag` 与 `dubbo.tag`。
+
+**Java / Dubbo 消费端**设置 Tag：
+
+```java
+RpcContext.getContext().setAttachment("dubbo.tag", "zhangsan");
+```
+
+**Python 示例客户端**：
+
+```bash
+python -m omr_service.rpc.tag_aware_client \
+    --method RecognizeByTemplate \
+    --tag zhangsan \
+    --template-id 1 \
+    --image-url "https://oss/xxx.jpg"
+```
+
+> 测试环境建议常驻至少一个空 Tag 基线实例，避免未带 Tag 的请求无实例可用。
 
 ## Redis Stream 批量任务
 

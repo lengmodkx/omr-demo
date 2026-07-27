@@ -11,6 +11,12 @@ nacos_password: ***REMOVED***
 nacos_service_name: omr-service
 nacos_group_name: DEFAULT_GROUP
 
+# 服务实例 Tag 开关（本地调试建议 true，正式环境建议 false 走基线实例）
+service_tag_enabled: true
+
+# 服务实例 Tag（用于本地调试隔离，默认自动使用本机 IP；空值表示基线实例）
+# service_tag: zhangsan
+
 # Redis 消息队列
 redis:
   host: 47.99.83.217

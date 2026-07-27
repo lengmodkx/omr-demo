@@ -13,6 +13,7 @@ from omr_service.loader.template_store import TemplateStore
 from omr_service.mq.client import MqClient
 from omr_service.mq.job_handler import BatchJobHandler
 from omr_service.mq.producer import MqProducer
+from omr_service.rpc.omr_service import OmrServiceServicer
 from omr_service.worker.pool import WorkerPool
 
 logger = logging.getLogger(__name__)
@@ -27,11 +28,13 @@ class MqConsumer:
         template_store: TemplateStore,
         image_loader: ImageLoader,
         worker_pool: WorkerPool,
+        servicer: Optional[OmrServiceServicer] = None,
     ):
         self.cfg = cfg
         self.template_store = template_store
         self.image_loader = image_loader
         self.worker_pool = worker_pool
+        self.servicer = servicer
         self._client: Optional[MqClient] = None
         self._producer: Optional[MqProducer] = None
         self._handler: Optional[BatchJobHandler] = None
@@ -88,6 +91,7 @@ class MqConsumer:
                 self.image_loader,
                 self.worker_pool,
                 self._producer,
+                servicer=self.servicer,
             )
 
             while not self._stop_event.is_set():
@@ -209,8 +213,13 @@ class MqConsumer:
     def _handle_one(self, msg_id: str, job: Dict[str, Any]) -> bool:
         """在 worker 线程中处理单条任务"""
         try:
-            logger.info("[mq] 收到任务: %s", job.get("task_id"))
-            result = self._handler.handle_single_task(job)
+            job_type = job.get("job_type", "")
+            if job_type == "parse_golden_template":
+                logger.info("[mq] 收到黄金模板解析任务: %s", job.get("job_id"))
+                result = self._handler.handle_parse_golden_template(job)
+            else:
+                logger.info("[mq] 收到任务: %s", job.get("task_id"))
+                result = self._handler.handle_single_task(job)
             return result.get("success", False) or result.get("retrying", False)
         except Exception as e:
             logger.exception("[mq] 任务处理失败: %s", e)

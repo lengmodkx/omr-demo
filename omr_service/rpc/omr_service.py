@@ -10,6 +10,7 @@ import numpy as np
 from omr_service.config import OmrConfig
 from omr_service.engine.cropper import SubjectiveCropper
 from omr_service.engine.ocr import PersonalInfoOcr
+from omr_service.engine.personal_info_block_parser import parse_personal_info_block
 from omr_service.engine.recognizer import RecognizeContext
 from omr_service.engine.recognizers import StandardTemplateRecognizer
 from omr_service.engine.standard_template import StandardTemplate
@@ -27,6 +28,9 @@ CODE_IMAGE_LOAD_FAIL = 5
 CODE_INVALID_REQUEST = 6
 CODE_INTERNAL_ERROR = 99
 
+# 考生信息区（整体框选，一次识别姓名/准考证号/考场/座号等）字段标识
+STUDENT_INFO_BLOCK_FIELD = "student_info_block"
+
 
 def _column_config_from_proto(cfg: omr_pb2.ColumnConfig) -> Dict[str, Any]:
     return {
@@ -39,6 +43,7 @@ def _column_config_from_proto(cfg: omr_pb2.ColumnConfig) -> Dict[str, Any]:
         "num_options": cfg.num_options,
         "option_axis": cfg.option_axis or "x",
         "reverse_q": cfg.reverse_q,
+        "page_index": cfg.page_index,
     }
 
 
@@ -186,19 +191,20 @@ class OmrServiceServicer(omr_pb2_grpc.OmrServiceServicer):
             )
 
         columns = [_column_config_from_proto(c) for c in request.columns]
-        if not columns:
-            return omr_pb2.GoldenTemplateResult(
-                code=CODE_INVALID_REQUEST,
-                message="columns 不能为空",
-            )
 
         try:
             tpl = StandardTemplate(image=images[0], column_configs=columns)
+            # 推断本次请求对应的页码：取所有配置中的 page_index，默认 0
+            page_indexes = {c.get("page_index", 0) for c in columns}
+            page_indexes.update({_personal_info_from_proto(p).get("page_index", 0) for p in request.personal_info})
+            page_indexes.update({_subjective_region_from_proto(s).get("page_index", 0) for s in request.subjective_regions})
+            current_page = min(page_indexes) if page_indexes else 0
             cached = CachedTemplate(
                 standard_template=tpl,
                 personal_info=[_personal_info_from_proto(p) for p in request.personal_info],
                 subjective_regions=[_subjective_region_from_proto(s) for s in request.subjective_regions],
                 image_url=request.template_image_url,
+                page_images={current_page: images[0]} if images else {},
             )
             self.template_store.set(request.template_id, cached)
 
@@ -206,28 +212,77 @@ class OmrServiceServicer(omr_pb2_grpc.OmrServiceServicer):
 
             # 黄金模板阶段可对个人信息区域做示例 OCR（用于确认位置，不强制要求准确）
             personal_info_pb = []
-            if cached.personal_info and images:
-                sample_results = self._ocr.recognize(images[0], cached.personal_info)
-                personal_info_pb = [
+            normal_infos = [
+                p for p in (cached.personal_info or [])
+                if p.get("field") != STUDENT_INFO_BLOCK_FIELD
+            ]
+            block_infos = [
+                p for p in (cached.personal_info or [])
+                if p.get("field") == STUDENT_INFO_BLOCK_FIELD
+            ]
+            logger.info(
+                "[rpc] ParseGoldenTemplate 个人信息拆分: normal=%d block=%d",
+                len(normal_infos), len(block_infos),
+            )
+
+            if normal_infos and images:
+                sample_results = self._ocr.recognize(images[0], normal_infos)
+                personal_info_pb.extend([
                     omr_pb2.PersonalInfoResult(
                         field=r.get("field", ""),
                         value=r.get("value", ""),
                         confidence=r.get("confidence", 0.0),
                     )
                     for r in sample_results
-                ]
+                ])
+
+            for block in block_infos:
+                if not images:
+                    continue
+                raw = self._ocr.recognize_block(images[0], block)
+                raw_text = raw.get("raw_text", "")
+                try:
+                    fields, conf = parse_personal_info_block(raw_text)
+                except Exception as e:
+                    logger.warning("黄金模板考生信息解析异常: %s | raw_text=%s", e, raw_text)
+                    fields, conf = {"raw_text": raw_text}, 0.0
+                for k, v in fields.items():
+                    personal_info_pb.append(omr_pb2.PersonalInfoResult(
+                        field=k,
+                        value=v,
+                        confidence=conf if v else 0.0,
+                    ))
+                # 临时调试字段，用于确认前端命中的是最新代码
+                personal_info_pb.append(omr_pb2.PersonalInfoResult(
+                    field="debug_parser_version",
+                    value="v2-barcode",
+                    confidence=1.0,
+                ))
 
             # 黄金模板阶段示例裁剪主观题区域（确认位置）
             subjective_crops_pb = []
             if cached.subjective_regions and images:
+                # Java 端按页拆请求时，每页只传一张图片，但 region 的 page_index 仍是原页码。
+                # 这里临时把 page_index 归一化为 0 用于选图，结果里再还原成原始页码。
+                single_image = len(images) == 1
+                regions_for_parse = []
+                original_page_by_q: Dict[int, int] = {}
+                for r in cached.subjective_regions:
+                    region_copy = dict(r)
+                    q = int(region_copy.get("q", 0))
+                    original_page_by_q[q] = region_copy.get("page_index", 0)
+                    if single_image:
+                        region_copy["page_index"] = 0
+                    regions_for_parse.append(region_copy)
+
                 sample_crops = self._cropper.crop_subjective_regions(
-                    images, cached.subjective_regions, namespace=f"tpl_{request.template_id}"
+                    images, regions_for_parse, namespace=f"tpl_{request.template_id}"
                 )
                 subjective_crops_pb = [
                     omr_pb2.SubjectiveCropResult(
                         q=c.get("q", 0),
                         image_url=c.get("image_url", ""),
-                        page_index=c.get("page_index", 0),
+                        page_index=original_page_by_q.get(int(c.get("q", 0)), c.get("page_index", 0)),
                     )
                     for c in sample_crops
                 ]
@@ -274,6 +329,7 @@ class OmrServiceServicer(omr_pb2_grpc.OmrServiceServicer):
             )
 
         images = self._load_images(image_url)
+        logger.info("[rpc] 答题卡图片加载完成: url=%s pages=%d", image_url, len(images))
         if not images:
             return omr_pb2.RecognizeResult(
                 code=CODE_IMAGE_LOAD_FAIL,
@@ -325,36 +381,77 @@ class OmrServiceServicer(omr_pb2_grpc.OmrServiceServicer):
         images: List[np.ndarray],
         regions: List[Dict[str, Any]],
     ) -> List[Dict[str, Any]]:
-        """按 page_index 分组图片，每页只预处理一次并批量识别个人信息区域。"""
+        """按 page_index 分组图片，批量识别普通个人信息，并单独解析考生信息区整体框。"""
         # 按 page_index 分组，同时保留原始顺序
         page_groups: Dict[int, List[Tuple[int, Dict[str, Any]]]] = {}
         for idx, region in enumerate(regions):
             page_index = int(region.get("page_index", 0))
             page_groups.setdefault(page_index, []).append((idx, region))
 
-        # 预分配结果槽位，保持与 regions 顺序一致
+        # 预分配结果槽位，普通区域保持与 regions 顺序一致；考生信息区整体框会展开为多个字段
         results: List[Optional[Dict[str, Any]]] = [None] * len(regions)
 
         for page_index, indexed_regions in page_groups.items():
             if page_index < 0 or page_index >= len(images):
                 for idx, region in indexed_regions:
-                    results[idx] = {
-                        "field": region.get("field", ""),
-                        "value": "",
-                        "confidence": 0.0,
-                    }
+                    if region.get("field") == STUDENT_INFO_BLOCK_FIELD:
+                        results[idx] = {"field": STUDENT_INFO_BLOCK_FIELD, "value": "", "confidence": 0.0}
+                    else:
+                        results[idx] = {
+                            "field": region.get("field", ""),
+                            "value": "",
+                            "confidence": 0.0,
+                        }
                 continue
 
-            page_region_list = [region for _, region in indexed_regions]
-            page_results = self._ocr.recognize(images[page_index], page_region_list)
-            for (idx, region), page_result in zip(indexed_regions, page_results):
-                result = page_result if page_result else {"field": region.get("field", ""), "value": "", "confidence": 0.0}
-                # 过滤低置信度
-                if result.get("confidence", 0.0) < self.cfg.ocr_confidence_threshold:
-                    result["value"] = ""
-                results[idx] = result
+            image = images[page_index]
+            normal_regions = []
+            normal_indices = []
+            block_regions = []
+            block_indices = []
+            for idx, region in indexed_regions:
+                if region.get("field") == STUDENT_INFO_BLOCK_FIELD:
+                    block_regions.append(region)
+                    block_indices.append(idx)
+                else:
+                    normal_regions.append(region)
+                    normal_indices.append(idx)
 
-        # 兜底：理论上每个位置都会被填充
+            # 普通字段批量识别
+            if normal_regions:
+                page_results = self._ocr.recognize(image, normal_regions)
+                for idx, page_result in zip(normal_indices, page_results):
+                    result = page_result if page_result else {"field": normal_regions[normal_indices.index(idx)].get("field", ""), "value": "", "confidence": 0.0}
+                    if result.get("confidence", 0.0) < self.cfg.ocr_confidence_threshold:
+                        result["value"] = ""
+                    results[idx] = result
+
+            # 考生信息区整体框：整框 OCR + 规则解析
+            for idx, region in zip(block_indices, block_regions):
+                raw_result = self._ocr.recognize_block(image, region)
+                raw_text = raw_result.get("raw_text", "")
+                try:
+                    fields, conf = parse_personal_info_block(raw_text)
+                except Exception as e:
+                    logger.warning("识别接口考生信息解析异常: %s | raw_text=%s", e, raw_text)
+                    fields, conf = {"raw_text": raw_text}, 0.0
+                # 以 raw_text 作为占位结果，后续再追加解析出的结构化字段
+                results[idx] = {
+                    "field": STUDENT_INFO_BLOCK_FIELD,
+                    "value": raw_text,
+                    "confidence": conf,
+                }
+                # 将解析出的子字段追加到结果末尾（顺序不重要，前端/后端按 field 读取）
+                for k, v in fields.items():
+                    if k == "raw_text":
+                        continue
+                    results.append({
+                        "field": k,
+                        "value": v,
+                        "confidence": conf if v else 0.0,
+                    })
+
+        # 兜底
         for idx, region in enumerate(regions):
             if results[idx] is None:
                 results[idx] = {"field": region.get("field", ""), "value": "", "confidence": 0.0}

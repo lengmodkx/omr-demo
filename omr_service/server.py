@@ -1,6 +1,7 @@
 """gRPC Server 装配"""
 import logging
 from concurrent import futures
+from typing import Optional
 
 import grpc
 
@@ -50,6 +51,7 @@ def create_server(
     template_store: TemplateStore,
     image_loader: ImageLoader,
     worker_pool: WorkerPool,
+    servicer: Optional[OmrServiceServicer] = None,
 ) -> grpc.Server:
     """创建并配置 gRPC server"""
     server = grpc.server(
@@ -58,7 +60,8 @@ def create_server(
                  ("grpc.max_receive_message_length", 50 * 1024 * 1024)],
         interceptors=[_TagLoggingInterceptor()],
     )
-    servicer = OmrServiceServicer(cfg, template_store, image_loader, worker_pool)
+    if servicer is None:
+        servicer = OmrServiceServicer(cfg, template_store, image_loader, worker_pool)
     omr_pb2_grpc.add_OmrServiceServicer_to_server(servicer, server)
     server.add_insecure_port(f"[::]:{cfg.dubbo_port}")
     return server

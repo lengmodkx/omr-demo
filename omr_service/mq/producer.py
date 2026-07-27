@@ -25,13 +25,20 @@ class MqProducer:
     def send_result(self, stream: Optional[str] = None, payload: Any = None, message_id: str = "*"):
         """发送 JSON 结果到 Redis Stream"""
         stream = stream or self.cfg.redis_result_stream
+        return self._xadd(stream, payload, message_id)
+
+    def send_job(self, payload: Any = None, message_id: str = "*"):
+        """发送（重试）任务到 Redis 任务流"""
+        return self._xadd(self.cfg.redis_job_stream, payload, message_id)
+
+    def _xadd(self, stream: str, payload: Any, message_id: str = "*"):
         body = json.dumps(payload, ensure_ascii=False, default=str)
         try:
             msg_id = self._client.redis.xadd(stream, {"payload": body}, id=message_id)
-            logger.debug("Redis 结果已发送: stream=%s id=%s", stream, msg_id)
+            logger.debug("Redis 消息已发送: stream=%s id=%s", stream, msg_id)
             return msg_id
         except Exception as e:
-            logger.error("Redis 结果发送失败: %s", e)
+            logger.error("Redis 消息发送失败: stream=%s error=%s", stream, e)
             raise
 
     def close(self):

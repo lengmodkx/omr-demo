@@ -8,7 +8,7 @@ import numpy as np
 
 from omr_service.config import OmrConfig
 from omr_service.loader.image_loader import ImageLoader
-from omr_service.loader.template_store import TemplateStore
+from omr_service.loader.template_store import CachedTemplate, TemplateStore
 from omr_service.rpc import omr_pb2, omr_pb2_grpc
 from omr_service.server import create_server
 from omr_service.worker.pool import WorkerPool
@@ -60,7 +60,8 @@ class TestIntegration(unittest.TestCase):
              "start_q": 1, "num_q": 3, "num_options": 4,
              "option_axis": "x", "reverse_q": False}
         ])
-        self.template_store.set(template_id, tpl)
+        cached = CachedTemplate(standard_template=tpl)
+        self.template_store.set(template_id, cached)
 
         # 这里只验证 RPC 返回模板存在
         return req

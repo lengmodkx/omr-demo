@@ -26,7 +26,7 @@ class SubjectiveCropper:
         output_dir: str = "./omr_crops",
         base_url: Optional[str] = None,
     ):
-        self.output_dir = Path(output_dir)
+        self.output_dir = Path(output_dir).resolve()
         self.base_url = base_url.rstrip("/") if base_url else None
         self.output_dir.mkdir(parents=True, exist_ok=True)
 

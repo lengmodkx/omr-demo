@@ -8,11 +8,15 @@ import numpy as np
 from omr_service.config import OmrConfig
 from omr_service.engine.cropper import SubjectiveCropper
 from omr_service.engine.ocr import PersonalInfoOcr
+from omr_service.engine.personal_info_block_parser import parse_personal_info_block
 from omr_service.engine.recognizer import RecognizeContext
+from omr_service.rpc.omr_service import STUDENT_INFO_BLOCK_FIELD
 from omr_service.engine.recognizers import StandardTemplateRecognizer
+from omr_service.http_server import _make_golden_template_request, _serialize_pb
 from omr_service.loader.image_loader import ImageLoader
 from omr_service.loader.template_store import CachedTemplate, TemplateStore
 from omr_service.mq.producer import MqProducer
+from omr_service.rpc.omr_service import OmrServiceServicer
 from omr_service.worker.pool import WorkerPool
 
 logger = logging.getLogger(__name__)
@@ -28,12 +32,14 @@ class BatchJobHandler:
         image_loader: ImageLoader,
         worker_pool: WorkerPool,
         producer: MqProducer,
+        servicer: Optional[OmrServiceServicer] = None,
     ):
         self.cfg = cfg
         self.template_store = template_store
         self.image_loader = image_loader
         self.worker_pool = worker_pool
         self.producer = producer
+        self.servicer = servicer
         self._ocr = PersonalInfoOcr()
         self._cropper = SubjectiveCropper(
             output_dir=cfg.crop_output_dir,
@@ -64,6 +70,7 @@ class BatchJobHandler:
             }
 
         images = self.image_loader.load_multi(image_url)
+        logger.info("[mq] 答题卡图片加载完成: url=%s pages=%d", image_url, len(images))
         if not images:
             return {
                 "scan_image_url": image_url,
@@ -119,7 +126,7 @@ class BatchJobHandler:
         images: List[np.ndarray],
         regions: List[Dict[str, Any]],
     ) -> List[Dict[str, Any]]:
-        """按 page_index 分组图片，每页只预处理一次并批量识别个人信息区域。"""
+        """按 page_index 分组图片，批量识别普通个人信息，并单独解析考生信息区整体框。"""
         page_groups: Dict[int, List[Tuple[int, Dict[str, Any]]]] = {}
         for idx, region in enumerate(regions):
             page_index = int(region.get("page_index", 0))
@@ -130,20 +137,58 @@ class BatchJobHandler:
         for page_index, indexed_regions in page_groups.items():
             if page_index < 0 or page_index >= len(images):
                 for idx, region in indexed_regions:
-                    results[idx] = {
-                        "field": region.get("field", ""),
-                        "value": "",
-                        "confidence": 0.0,
-                    }
+                    if region.get("field") == STUDENT_INFO_BLOCK_FIELD:
+                        results[idx] = {"field": STUDENT_INFO_BLOCK_FIELD, "value": "", "confidence": 0.0}
+                    else:
+                        results[idx] = {
+                            "field": region.get("field", ""),
+                            "value": "",
+                            "confidence": 0.0,
+                        }
                 continue
 
-            page_region_list = [region for _, region in indexed_regions]
-            page_results = self._ocr.recognize(images[page_index], page_region_list)
-            for (idx, region), page_result in zip(indexed_regions, page_results):
-                result = page_result if page_result else {"field": region.get("field", ""), "value": "", "confidence": 0.0}
-                if result.get("confidence", 0.0) < self.cfg.ocr_confidence_threshold:
-                    result["value"] = ""
-                results[idx] = result
+            image = images[page_index]
+            normal_regions = []
+            normal_indices = []
+            block_regions = []
+            block_indices = []
+            for idx, region in indexed_regions:
+                if region.get("field") == STUDENT_INFO_BLOCK_FIELD:
+                    block_regions.append(region)
+                    block_indices.append(idx)
+                else:
+                    normal_regions.append(region)
+                    normal_indices.append(idx)
+
+            if normal_regions:
+                page_results = self._ocr.recognize(image, normal_regions)
+                for idx, page_result in zip(normal_indices, page_results):
+                    result = page_result if page_result else {"field": normal_regions[normal_indices.index(idx)].get("field", ""), "value": "", "confidence": 0.0}
+                    if result.get("confidence", 0.0) < self.cfg.ocr_confidence_threshold:
+                        result["value"] = ""
+                    results[idx] = result
+
+            for idx, region in zip(block_indices, block_regions):
+                raw_result = self._ocr.recognize_block(image, region)
+                raw_text = raw_result.get("raw_text", "")
+                try:
+                    fields, conf = parse_personal_info_block(raw_text)
+                except Exception as e:
+                    logger.warning("考生信息解析异常，保留原始文本: %s | raw_text=%s", e, raw_text)
+                    fields, conf = {"raw_text": raw_text}, 0.0
+                results[idx] = {
+                    "field": STUDENT_INFO_BLOCK_FIELD,
+                    "value": raw_text,
+                    "confidence": conf,
+                }
+                for k, v in fields.items():
+                    if k == "raw_text":
+                        continue
+                    results.append({
+                        "field": k,
+                        "value": v,
+                        "confidence": conf if v else 0.0,
+                    })
 
         for idx, region in enumerate(regions):
             if results[idx] is None:
@@ -212,6 +257,156 @@ class BatchJobHandler:
                 except Exception as se:
                     logger.error("[mq] 失败结果发送失败 task_id=%s", task_id, exc_info=se)
             return {"success": False, "task_id": task_id, "retrying": False}
+
+    def handle_parse_golden_template(self, job: Dict[str, Any]) -> Dict[str, Any]:
+        """处理整张试卷模板的黄金模板解析任务（可能多页）。
+
+        Args:
+            job: 包含 job_id, template_id, pages, retry_count, max_retry 的字典。
+
+        Returns:
+            {"success": bool, "job_id": str, "retrying": bool}
+        """
+        job_id = job.get("job_id", "")
+        template_id = int(job.get("template_id", 0))
+        retry_count = int(job.get("retry_count", 0))
+        max_retry = int(job.get("max_retry", self.cfg.omr_max_retry))
+
+        try:
+            data = self._do_parse_golden_template(job)
+            code = data.get("code", -1)
+            if code == 0:
+                payload = self._build_parse_success_payload(job_id, template_id, data)
+                self.producer.send_result(payload=payload)
+                logger.info("[mq] 黄金模板解析任务成功 job_id=%s", job_id)
+                return {"success": True, "job_id": job_id, "retrying": False}
+
+            # 永久性错误（请求无效、图片加载失败）直接失败，不再重试
+            if code in (4, 5, 6):
+                logger.warning(
+                    "[mq] 黄金模板解析遇到永久性错误，直接失败 job_id=%s code=%s message=%s",
+                    job_id, code, data.get("message", ""),
+                )
+                payload = self._build_parse_failure_payload(
+                    job_id, template_id, data.get("message", "黄金模板解析失败")
+                )
+                self.producer.send_result(payload=payload)
+                return {"success": False, "job_id": job_id, "retrying": False}
+
+            raise RuntimeError(data.get("message", "黄金模板解析失败"))
+        except Exception as e:
+            logger.exception("[mq] 黄金模板解析任务失败 job_id=%s retry=%s", job_id, retry_count)
+            retry_count += 1
+            if retry_count <= max_retry:
+                retry_job = dict(job)
+                retry_job["retry_count"] = retry_count
+                try:
+                    self.producer.send_job(payload=retry_job)
+                    logger.info("[mq] 黄金模板解析任务重试入队 job_id=%s retry=%s", job_id, retry_count)
+                    return {"success": False, "job_id": job_id, "retrying": True}
+                except Exception as re:
+                    logger.error("[mq] 黄金模板解析重试入队失败 job_id=%s", job_id, exc_info=re)
+                    retry_count = max_retry + 1
+
+            if retry_count > max_retry:
+                payload = self._build_parse_failure_payload(job_id, template_id, str(e))
+                try:
+                    self.producer.send_result(payload=payload)
+                except Exception as se:
+                    logger.error("[mq] 黄金模板解析失败结果发送失败 job_id=%s", job_id, exc_info=se)
+            return {"success": False, "job_id": job_id, "retrying": False}
+
+    def _do_parse_golden_template(self, job: Dict[str, Any]) -> Dict[str, Any]:
+        """逐页调用 ParseGoldenTemplate 并合并结果。"""
+        template_id = int(job.get("template_id", 0))
+        pages: List[Dict[str, Any]] = job.get("pages", []) or []
+        if not pages:
+            return {"code": 6, "message": "pages 不能为空"}
+
+        merged_answers: Dict[int, str] = {}
+        merged_bubbles: List[Dict[str, Any]] = []
+        merged_personal_info: List[Dict[str, Any]] = []
+        merged_subjective_crops: List[Dict[str, Any]] = []
+        total = 0
+
+        for page in pages:
+            page["template_id"] = template_id
+            req = _make_golden_template_request(page)
+            if self.servicer is None:
+                return {"code": 99, "message": "servicer 未初始化，无法解析黄金模板"}
+            resp = self.servicer.ParseGoldenTemplate(req, context=None)
+            resp_dict = _serialize_pb(resp)
+            resp_dict.setdefault("code", getattr(resp, "code", 0))
+
+            code = resp_dict.get("code", -1)
+            if code != 0:
+                return {
+                    "code": code,
+                    "message": resp_dict.get("message", "第 {} 页黄金模板解析失败".format(page.get("page_index", 0) + 1)),
+                }
+
+            merged_answers.update(resp_dict.get("answers", {}) or {})
+            merged_bubbles.extend(resp_dict.get("bubbles", []) or [])
+            merged_personal_info.extend(resp_dict.get("personal_info", []) or [])
+            merged_subjective_crops.extend(resp_dict.get("subjective_crops", []) or [])
+            total += resp_dict.get("total", 0)
+
+        return {
+            "code": 0,
+            "message": "ok",
+            "template_id": template_id,
+            "answers": merged_answers,
+            "bubbles": merged_bubbles,
+            "personal_info": merged_personal_info,
+            "subjective_crops": merged_subjective_crops,
+            "total": total,
+            "total_images": len(pages),
+            "success_count": len(pages),
+            "failed_count": 0,
+        }
+
+    def _build_parse_success_payload(
+        self,
+        job_id: str,
+        template_id: int,
+        data: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        return {
+            "job_id": job_id,
+            "job_type": "parse_golden_template",
+            "template_id": template_id,
+            "status": 2,
+            "answers": data.get("answers", {}),
+            "bubbles": data.get("bubbles", []),
+            "personal_info": data.get("personal_info", []),
+            "subjective_crops": data.get("subjective_crops", []),
+            "total": data.get("total", 0),
+            "total_images": data.get("total_images", 1),
+            "success_count": data.get("success_count", 1),
+            "failed_count": data.get("failed_count", 0),
+        }
+
+    def _build_parse_failure_payload(
+        self,
+        job_id: str,
+        template_id: int,
+        error_msg: str,
+    ) -> Dict[str, Any]:
+        return {
+            "job_id": job_id,
+            "job_type": "parse_golden_template",
+            "template_id": template_id,
+            "status": 3,
+            "error_msg": error_msg,
+            "answers": {},
+            "bubbles": [],
+            "personal_info": [],
+            "subjective_crops": [],
+            "total": 0,
+            "total_images": 0,
+            "success_count": 0,
+            "failed_count": 1,
+        }
 
     def handle(self, job: Dict[str, Any]) -> Dict[str, Any]:
         """兼容旧版聚合消息：拆分为单任务逐个处理。"""
