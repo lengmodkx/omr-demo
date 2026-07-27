@@ -20,9 +20,14 @@ class TestMqMessages(unittest.TestCase):
         self.assertEqual(len(parsed["image_urls"]), 2)
 
     def test_job_handler_template_not_found(self):
-        """模板不存在时返回错误结果"""
+        """模板不存在且不允许重试时返回错误结果"""
         cfg = MagicMock()
         cfg.redis_result_stream = "omr:batch:result"
+        cfg.redis_job_stream = "omr:batch:job"
+        cfg.omr_max_retry = 0
+        cfg.ocr_confidence_threshold = 0.3
+        cfg.crop_output_dir = "./omr_crops"
+        cfg.crop_base_url = None
         store = MagicMock()
         store.get.return_value = None
         loader = MagicMock()
@@ -36,8 +41,8 @@ class TestMqMessages(unittest.TestCase):
 
         self.assertEqual(result["completed"], 0)
         self.assertEqual(result["failed"], 1)
-        self.assertEqual(result["results"][0]["code"], 4)
         producer.send_result.assert_called_once()
+        producer.send_job.assert_not_called()
 
 
 if __name__ == "__main__":

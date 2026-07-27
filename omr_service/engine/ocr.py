@@ -5,13 +5,31 @@
 """
 
 import logging
+import re
 import threading
 from typing import Any, Dict, List, Optional
+
+
 
 import cv2
 import numpy as np
 
 logger = logging.getLogger(__name__)
+
+# 常见准考证号/考生号类字段标识，识别后需要兜底提取纯数字
+_STUDENT_ID_FIELDS = {
+    "student_no",
+    "admission_no",
+    "exam_no",
+    "candidate_no",
+    "id_number",
+    "准考证号",
+    "准考证号码",
+    "考号",
+    "学号",
+    "考生号",
+    "报名号",
+}
 
 
 class PersonalInfoOcr:
@@ -81,12 +99,64 @@ class PersonalInfoOcr:
                 continue
             preprocessed = self._preprocess(crop)
             value, confidence = self._recognize_one(engine, preprocessed)
+            # 准考证号等字段：OCR 容易把标签和数字连在一起；同时尝试条码解码兜底
+            if field and self._is_student_id_field(field):
+                barcode_texts = self._try_decode_barcodes(crop)
+                if barcode_texts:
+                    combined = (value + "\n" + "\n".join(barcode_texts)).strip()
+                    logger.info(
+                        "[ocr] 字段 %s 条码解码结果: %s, 与 OCR 合并: '%s'",
+                        field, barcode_texts, combined,
+                    )
+                    value = combined
+                extracted = self._extract_id_number(value)
+                if extracted and extracted != value:
+                    logger.info(
+                        "[ocr] 字段 %s 原值 '%s' 包含非数字内容，提取准考证号: %s",
+                        field, value, extracted,
+                    )
+                    value = extracted
             results.append({
                 "field": field,
                 "value": value,
                 "confidence": round(confidence, 4),
             })
         return results
+
+    @staticmethod
+    def _try_decode_barcodes(image: np.ndarray) -> List[str]:
+        """尝试识别图片中的条形码/二维码，返回解码字符串列表"""
+        try:
+            from pyzbar.pyzbar import decode
+
+            barcodes = decode(image)
+            results = []
+            for barcode in barcodes:
+                data = barcode.data.decode("utf-8") if barcode.data else ""
+                if data:
+                    results.append(data)
+            return results
+        except Exception as e:
+            logger.debug("条码解码异常: %s", e)
+            return []
+
+    @staticmethod
+    def _is_student_id_field(field: str) -> bool:
+        """判断字段是否为准考证号/考生号类字段"""
+        if not field:
+            return False
+        key = field.strip().lower().replace(" ", "_")
+        return key in _STUDENT_ID_FIELDS or any(
+            token in key for token in ("student", "admission", "exam", "candidate", "准考证", "考号", "学号", "考生号", "报名号")
+        )
+
+    @staticmethod
+    def _extract_id_number(text: str) -> str:
+        """从文本中提取最长的 6-20 位数字串，用于准考证号兜底"""
+        if not text:
+            return ""
+        nums = re.findall(r"\d{6,20}", text)
+        return max(nums, key=len) if nums else ""
 
     @staticmethod
     def _crop(image: np.ndarray, region: Dict[str, Any]) -> np.ndarray:
@@ -136,9 +206,77 @@ class PersonalInfoOcr:
         return full_text, avg_conf
 
 
+    def recognize_block(
+        self,
+        image: np.ndarray,
+        region: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """识别整块的考生信息区，保留换行与空格，返回原始文本和平均置信度。
+
+        Args:
+            image: 完整答题卡图片（BGR）
+            region: 区域配置，包含 x1, y1, x2, y2
+
+        Returns:
+            {"raw_text": str, "confidence": float}
+        """
+        engine = self._get_engine()
+        crop = self._crop(image, region)
+        if crop.size == 0:
+            return {"raw_text": "", "confidence": 0.0}
+
+        if engine is None:
+            return {"raw_text": "", "confidence": 0.0}
+
+        preprocessed = self._preprocess(crop)
+        try:
+            result = engine.ocr(preprocessed, cls=True)
+        except Exception as e:
+            logger.warning("考生信息区 OCR 异常: %s", e)
+            return {"raw_text": "", "confidence": 0.0}
+
+        if not result or not result[0]:
+            return {"raw_text": "", "confidence": 0.0}
+
+        texts = []
+        confidences = []
+        for line in result[0]:
+            if line and len(line) == 2:
+                _, (text, conf) = line
+                if text:
+                    texts.append(text)
+                confidences.append(float(conf) if conf is not None else 0.0)
+
+        # 尝试条码解码（准考证号常为条形码），把解码结果追加到文本末尾供后续规则提取
+        try:
+            from pyzbar.pyzbar import decode
+
+            barcodes = decode(crop)
+            for barcode in barcodes:
+                data = barcode.data.decode("utf-8") if barcode.data else ""
+                if data:
+                    texts.append(data)
+                    confidences.append(1.0)
+        except Exception as e:
+            logger.debug("考生信息区条码解码异常: %s", e)
+
+        # 按 PaddleOCR 返回的行顺序拼接，保留换行
+        raw_text = "\n".join(texts).strip()
+        avg_conf = sum(confidences) / len(confidences) if confidences else 0.0
+        return {"raw_text": raw_text, "confidence": round(avg_conf, 4)}
+
+
 def recognize_personal_info(
     image: np.ndarray,
     regions: List[Dict[str, Any]],
 ) -> List[Dict[str, Any]]:
     """便捷函数：识别个人信息区域"""
     return PersonalInfoOcr().recognize(image, regions)
+
+
+def recognize_personal_info_block(
+    image: np.ndarray,
+    region: Dict[str, Any],
+) -> Dict[str, Any]:
+    """便捷函数：识别考生信息区整体"""
+    return PersonalInfoOcr().recognize_block(image, region)

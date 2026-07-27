@@ -13,22 +13,52 @@
 - **requests + tenacity** — 图片下载与重试
 - **nacos-sdk-python (v2/v3 gRPC)** — 服务自注册 + 配置中心
 
+## PaddleOCR 环境说明
+
+Windows CPU 上经过验证的稳定组合：
+
+- **Python** 3.11
+- **paddlepaddle** 2.6.2
+- **paddleocr** 2.7.3
+- **numpy** 1.26.4
+- **protobuf** 3.20.2
+
+`nacos-sdk-python==3.2.0` 默认生成的 gRPC pb 依赖 protobuf 5.x 的
+`runtime_version` API，与 PaddlePaddle 要求的 `protobuf<=3.20.2` 冲突。
+安装依赖后必须执行一次 `python scripts/patch_nacos_protobuf.py`，
+该脚本会移除 pb 文件中的高版本运行时校验，使 Nacos 注册/配置中心与
+PaddleOCR 可以共存。
+
+此外 SDK 3.2.0 的 `AuthClient.get_access_token` 会把用户名/密码拼在 URL
+query 中登录，部分网络（WAF/安全中间件）会拦截 query 同时携带
+`username`+`password` 的请求导致 `Error [500]: get access token failed`。
+`omr_service/nacos_v2_compat.py` 已在运行时把登录请求补丁为表单 POST body
+（与 Java 客户端一致），无需额外脚本；升级 SDK 后需确认该补丁仍必要。
+
 ## Build and Run Commands
 
 ```bash
-# 安装依赖
-python -m venv .venv
-source .venv/Scripts/activate
+# 安装依赖（Windows CPU 推荐 Python 3.11 虚拟环境）
+python -m venv .venv-py311
+
+# 激活虚拟环境（PowerShell 用 .ps1，Git Bash 用 source）
+.venv-py311\Scripts\Activate.ps1        # PowerShell
+# source .venv-py311/Scripts/activate   # Git Bash
+
 pip install -r requirements.txt
 
-# 配置环境变量
-cp .env.example .env
+# 解决 nacos-sdk-python 3.2.0 与 PaddlePaddle 的 protobuf 版本冲突
+python scripts/patch_nacos_protobuf.py
+
+# 配置环境变量（PowerShell 用 Copy-Item，Git Bash 用 cp）
+Copy-Item .env.example .env
+# cp .env.example .env
 
 # 启动服务
 python -m omr_service.main
 
 # 运行测试
-python -m unittest discover -s tests -p "test_*.py" -v
+python -m unittest discover -s omr_service/tests -p "test_*.py" -v
 
 # Docker 构建
 docker compose build
@@ -54,6 +84,57 @@ redis:
 ```
 
 会被打平为 `redis.host`, `redis.port` 等键。
+
+## 本地调试隔离：Service Tag 路由
+
+为支持多人在**同一 Nacos 注册中心**下本地调试，OMR 服务支持给实例打 Tag：
+
+- 配置项：`OMR_SERVICE_TAG`（或 Nacos 配置 `service_tag`）。
+- 空值表示**基线实例**（测试环境 / 未打标）。
+- 非空值表示开发者本地实例，例如 `zhangsan`、`feat-xxx`。
+
+Provider 注册时会把 Tag 写入 Nacos 实例 metadata：
+
+```json
+{
+  "tag": "zhangsan",
+  "dubbo.tag": "zhangsan"
+}
+```
+
+### 消费端路由方式
+
+1. **Dubbo / Java 消费端（推荐）**：
+   ```java
+   RpcContext.getContext().setAttachment("dubbo.tag", "zhangsan");
+   // 发起调用
+   ```
+   Dubbo `TagRouter` 会根据 Provider metadata 中的 `dubbo.tag` 自动路由。
+
+2. **通用消费端 / Python / 网关**：
+   消费端从 Nacos 拉取实例列表后，按 `metadata.tag` 过滤；命中则在这些实例中负载均衡，未命中则 fallback 到基线实例。
+
+   项目已提供示例客户端：
+   ```bash
+   python -m omr_service.rpc.tag_aware_client \
+       --method RecognizeByTemplate \
+       --tag zhangsan \
+       --template-id 1 \
+       --image-url "http://..."
+   ```
+
+### 链路传递
+
+典型调用链：网关 / 入口服务 → 服务 A → OMR 服务。
+
+- 入口层从 HTTP Header `x-service-tag: zhangsan` 读取 Tag。
+- 向下游 RPC 调用时，把 Tag 写入 gRPC Metadata 或 Dubbo Attachment。
+- OMR Python 服务在 gRPC interceptor 中读取 `x-service-tag` 并记录日志，方便验证请求是否路由到本实例。
+
+### 注意事项
+
+- 测试环境建议常驻至少一个空 Tag 基线实例，否则未打标的请求会找不到实例。
+- 当前 `omr:batch:job` Redis Stream 是服务内部任务队列，不经过服务发现，不受 Tag 路由影响。如需隔离批量任务，需在消息体中额外携带 tag。
 
 ## Code Organization
 

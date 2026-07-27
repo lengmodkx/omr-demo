@@ -137,7 +137,7 @@ class OmrConfig:
             redis_host=_get("redis.host", "REDIS_HOST", "127.0.0.1"),
             redis_port=_get("redis.port", "REDIS_PORT", 6379, int),
             redis_password=_get("redis.password", "REDIS_PASSWORD", None) or None,
-            redis_db=_get("redis.db", "REDIS_DB", 4, int),
+            redis_db=_get("redis.db", "REDIS_DB", 1, int),
             redis_timeout=_get("redis.timeout", "REDIS_TIMEOUT", 10, int),
             redis_ssl=_get("redis.ssl", "REDIS_SSL", False, lambda x: str(x).lower() in ("true", "1", "yes")),
             redis_job_stream=_get("redis.job_stream", "REDIS_JOB_STREAM", "omr:batch:job"),

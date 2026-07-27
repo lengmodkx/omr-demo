@@ -16,9 +16,11 @@ from __future__ import annotations
 
 import json
 import logging
+import mimetypes
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from typing import Any, Callable, Dict, Tuple
+from pathlib import Path
+from typing import Any, Callable, Dict, Optional, Tuple
 
 import os
 import sys
@@ -158,12 +160,14 @@ def _make_request(j: Dict[str, Any], method: str):
 # HTTP server
 # ---------------------------------------------------------------------------
 
-def _make_handler(servicer: OmrServiceServicer, health_path: str = "/health"):
+def _make_handler(servicer: OmrServiceServicer, health_path: str = "/health", crop_output_dir: Optional[str] = None):
     """Build a request handler class bound to the given servicer.
 
     用闭包而非实例属性,因为 BaseHTTPRequestHandler 由 HTTPServer 直接构造,
     不接受额外参数。
     """
+
+    crop_root = Path(crop_output_dir).resolve() if crop_output_dir else None
 
     class _Handler(BaseHTTPRequestHandler):
         # 显式声明避免 IDE 警告
@@ -175,8 +179,36 @@ def _make_handler(servicer: OmrServiceServicer, health_path: str = "/health"):
         def do_GET(self):
             if self.path == health_path:
                 self._reply_json(200, {"status": "UP"})
+            elif crop_root and self.path.startswith("/omr_crops/"):
+                self._serve_crop()
             else:
                 self._reply_json(404, {"error": "not found", "path": self.path})
+
+        def _serve_crop(self):
+            """提供主观题裁剪图片静态访问（带 CORS）。"""
+            try:
+                relative = self.path[len("/omr_crops/"):]
+                # 禁止路径穿越
+                target = (crop_root / relative).resolve()
+                if crop_root not in target.parents and target != crop_root:
+                    self._reply_json(403, {"error": "forbidden"})
+                    return
+                if not target.is_file():
+                    self._reply_json(404, {"error": "file not found", "path": self.path})
+                    return
+                content = target.read_bytes()
+                content_type, _ = mimetypes.guess_type(str(target))
+                content_type = content_type or "application/octet-stream"
+                self.send_response(200)
+                self.send_header("Content-Type", content_type)
+                self.send_header("Content-Length", str(len(content)))
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.send_header("Cache-Control", "public, max-age=3600")
+                self.end_headers()
+                self.wfile.write(content)
+            except Exception as e:
+                logger.exception("提供裁剪图片失败: %s", self.path)
+                self._reply_json(500, {"error": "internal server error"})
 
         def do_POST(self):
             path = self.path.rstrip("/")
@@ -243,12 +275,22 @@ def _make_handler(servicer: OmrServiceServicer, health_path: str = "/health"):
             self.send_response(status)
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("Content-Length", str(len(data)))
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+            self.send_header("Access-Control-Allow-Headers", "Content-Type")
             self.end_headers()
             try:
                 self.wfile.write(data)
             except BrokenPipeError:
                 # 客户端中途断开是常见场景,不影响服务端
                 pass
+
+        def do_OPTIONS(self):
+            self.send_response(204)
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+            self.send_header("Access-Control-Allow-Headers", "Content-Type")
+            self.end_headers()
 
     return _Handler
 
@@ -259,14 +301,15 @@ class OmrHttpServer:
     与 dubbo_tri_server 并行运行;客户端可以绕过 Dubbo 直接调 HTTP。
     """
 
-    def __init__(self, servicer: OmrServiceServicer, port: int):
+    def __init__(self, servicer: OmrServiceServicer, port: int, crop_output_dir: Optional[str] = None):
         self.port = port
         self._servicer = servicer
+        self._crop_output_dir = crop_output_dir
         self._server: HTTPServer = None
         self._thread: threading.Thread = None
 
     def start(self):
-        handler_cls = _make_handler(self._servicer)
+        handler_cls = _make_handler(self._servicer, crop_output_dir=self._crop_output_dir)
         # ThreadingHTTPServer 让每个请求用独立线程处理
         from http.server import ThreadingHTTPServer
         self._server = ThreadingHTTPServer(("0.0.0.0", self.port), handler_cls)

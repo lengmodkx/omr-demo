@@ -36,6 +36,8 @@ class StandardTemplate:
         reverse_q (2026-06-04 新增):
         - True: Q1 放在题号轴末端 (option_axis="x" → y2 端; option_axis="y" → x2 端)
         - False (默认): Q1 放在题号轴起点
+
+        page_index (新增): 该列选择题所在页码（0-based），用于多页答题卡
         """
         x1, y1 = cfg["x1"], cfg["y1"]
         x2, y2 = cfg["x2"], cfg["y2"]
@@ -44,6 +46,7 @@ class StandardTemplate:
         num_options = cfg["num_options"]
         reverse_q = cfg.get("reverse_q", False)  # 2026-06-04 新增
         option_axis = cfg.get("option_axis", "x")  # 2026-06-08 新增
+        page_index = cfg.get("page_index", 0)
 
         if option_axis == "x":
             # 标准:选项在 x 轴、题号在 y 轴
@@ -70,6 +73,7 @@ class StandardTemplate:
                         "w": bubble_w,
                         "h": bubble_h,
                         "_strict_axis": strict_axis,
+                        "page_index": page_index,
                     })
         else:  # option_axis == "y"
             # 横排题:选项在 y 轴、题号在 x 轴
@@ -99,6 +103,7 @@ class StandardTemplate:
                         "w": bubble_w,
                         "h": bubble_h,
                         "_strict_axis": strict_axis,
+                        "page_index": page_index,
                     })
         return bubbles
 
