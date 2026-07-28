@@ -69,6 +69,15 @@ class OmrService:
             "multiple_count": sum(1 for a in answers if a.get("is_multiple")),
             "elapsed_ms": int((time.monotonic() - t0) * 1000),
         }
+
+        # OCR 个人信息
+        if request.get("personal_info_region"):
+            result["personal_info"] = self.ocr_engine.recognize(images)
+
+        # 主观题裁剪
+        if request.get("subjective_regions"):
+            result["subjective_crops"] = self.cropper.crop(images, request["subjective_regions"])
+
         return result
 
     def parse_golden_template(self, request: dict[str, Any]) -> dict[str, Any]:
@@ -85,7 +94,7 @@ class OmrService:
         images = self._load_images([template_url])
         answers, bubble_grid = self._do_parse(images[0], columns)
 
-        return {
+        result = {
             "code": 0,
             "message": "ok",
             "template_id": template_id,
@@ -93,6 +102,12 @@ class OmrService:
             "bubble_grid": bubble_grid,
             "elapsed_ms": int((time.monotonic() - t0) * 1000),
         }
+
+        # 黄金模板阶段示例 OCR（用于确认位置，不强制要求准确）
+        if request.get("personal_info_region"):
+            result["personal_info_sample"] = self.ocr_engine.recognize(images)
+
+        return result
 
     def verify_recognition_rate(self, request: dict[str, Any]) -> dict[str, Any]:
         """暂未实现."""
@@ -113,9 +128,16 @@ class OmrService:
             raise ImageLoadError(url="?", reason=str(e)) from e
 
     def _do_recognize(self, template, images, request):
-        """占位: 实际识别逻辑接下来从 omr_service/rpc/omr_service.py 迁入."""
-        # TODO: 接入 engine/recognizers/standard.py
-        return [], False
+        """真实识别流程 (从 rpc/omr_service.py 迁移).
+
+        返回 (answers, abnormal). answers 是 list of dict.
+        """
+        from omr_service.engine.recognizers.standard import StandardTemplateRecognizer
+
+        recognizer = StandardTemplateRecognizer()
+        context = {"template": template, "images": images, "config": request}
+        raw = recognizer.recognize(context)
+        return raw.get("answers", []), raw.get("abnormal", False)
 
     def _do_parse(self, image, columns):
         """占位: 模板解析逻辑."""

@@ -111,3 +111,53 @@ def test_reverify_paper_delegates_to_recognize(service, mock_deps):
     })
 
     assert result["code"] == 0
+
+
+def test_recognize_includes_ocr_personal_info(service, mock_deps):
+    """OCR 识别个人信息 (mock 返回)."""
+    img = np.zeros((100, 100, 3), dtype=np.uint8)
+    mock_deps["image_loader"].load.return_value = [img]
+    mock_deps["template_store"].get.return_value = MagicMock()
+    mock_deps["worker_pool"].submit.return_value.result.return_value = ([], False)
+    mock_deps["ocr_engine"].recognize.return_value = {"name": "张三", "exam_id": "B001"}
+
+    result = service.recognize({
+        "template_id": "t-1",
+        "scan_image_urls": ["http://x/y.jpg"],
+        "personal_info_region": {"x": 0, "y": 0, "width": 100, "height": 50},
+    })
+
+    assert "personal_info" in result
+    assert result["personal_info"]["name"] == "张三"
+
+
+def test_recognize_includes_subjective_crops(service, mock_deps):
+    img = np.zeros((100, 100, 3), dtype=np.uint8)
+    mock_deps["image_loader"].load.return_value = [img]
+    mock_deps["template_store"].get.return_value = MagicMock()
+    mock_deps["worker_pool"].submit.return_value.result.return_value = ([], False)
+    mock_deps["cropper"].crop.return_value = [
+        {"region_id": "q-1", "url": "http://x/c1.jpg", "width": 100, "height": 50}
+    ]
+
+    result = service.recognize({
+        "template_id": "t-1",
+        "scan_image_urls": ["http://x/y.jpg"],
+        "subjective_regions": [{"region_id": "q-1", "x": 0, "y": 0, "width": 100, "height": 50}],
+    })
+
+    assert "subjective_crops" in result
+    assert result["subjective_crops"][0]["region_id"] == "q-1"
+
+
+def test_parse_golden_template_with_personal_info(service, mock_deps):
+    mock_deps["image_loader"].load.return_value = [np.zeros((100, 100, 3), dtype=np.uint8)]
+
+    result = service.parse_golden_template({
+        "template_id": "t-1",
+        "template_image_url": "http://x/tpl.jpg",
+        "columns": [{"column_id": "c1", "column_index": 0, "question_start": 1, "question_count": 5, "options_per_question": 4}],
+        "personal_info_region": {"x": 0, "y": 0, "width": 100, "height": 50},
+    })
+
+    assert "personal_info_sample" in result
