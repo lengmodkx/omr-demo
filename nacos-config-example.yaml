@@ -1,37 +1,14 @@
-# Nacos 配置中心模板
-# dataId: omr-service.yaml
-# group: DEFAULT_GROUP
-# namespace: 8c4541fd-870e-414d-bdee-72cab49fe8d2
-
-# Nacos 自身配置（如未配置，默认使用 .env / 环境变量）
-nacos_server: 39.153.154.183:8848
-nacos_namespace: 8c4541fd-870e-414d-bdee-72cab49fe8d2
-nacos_username: nacos
-nacos_password: ***REMOVED***
-nacos_service_name: omr-service
-nacos_group_name: DEFAULT_GROUP
-
-# 服务实例 Tag 开关（本地调试建议 true，正式环境建议 false 走基线实例）
-service_tag_enabled: true
-
-# 服务实例 Tag（用于本地调试隔离，默认自动使用本机 IP；空值表示基线实例）
-# service_tag: zhangsan
-
-# Redis 消息队列
-redis:
-  host: 47.99.83.217
-  port: 6379
-  password: ***REMOVED***
-  db: 4
-  timeout: 10
-  ssl: false
-  job_stream: omr:batch:job
-  result_stream: omr:batch:result
-  consumer_group: omr-service
-
-# 运行时
-omr_dubbo_port: 20884
-omr_health_port: 8080
-omr_worker_count: 4
-omr_image_timeout: 30
-omr_max_image_bytes: 52428800
+omr-service:
+  omr:
+    http_host: 0.0.0.0
+    http_port: 8080
+    log_level: INFO
+    redis:
+      host: redis
+      port: 6379
+      db: 4
+      stream_job: omr:batch:job
+      stream_result: omr:batch:result
+      result_hash_prefix: omr:batch:result:hash
+    worker_pool_size: 4
+    consumer_enabled: true
