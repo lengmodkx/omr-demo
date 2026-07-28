@@ -162,3 +162,97 @@ class OmrConfig:
             service_tag_enabled=tag_enabled,
             service_tag=service_tag,
         )
+
+
+# ========================================================================
+# 以下为 FastAPI 改造 P1 引入 (2026-07-28)
+# 老的 dataclass OmrConfig 保留以便过渡期使用，新代码统一使用 OmrSettings
+# ========================================================================
+
+from typing import Optional  # noqa: E402
+
+import os  # noqa: E402
+
+import warnings  # noqa: E402
+
+from pydantic_settings import BaseSettings, SettingsConfigDict  # noqa: E402
+
+
+class OmrSettings(BaseSettings):
+    """新配置模型: Pydantic Settings.
+
+    加载优先级: Nacos > 环境变量/.env > Pydantic 默认
+    兼容期字段 (1 个版本后删除):
+    - legacy_dubbo_port: 读取 OMR_LEGACY_DUBBO_PORT, 仅用于 warning 日志
+    - 旧 OMR_HEALTH_PORT 读取后写入 warning 日志
+    """
+
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_prefix="OMR_",
+        case_sensitive=False,
+        extra="ignore",
+    )
+
+    # 服务
+    http_host: str = "0.0.0.0"
+    http_port: int = 8080
+    # health_port 已合并到 http_port=8080
+    log_level: str = "INFO"
+
+    # Nacos
+    nacos_enabled: bool = True
+    nacos_server: str = "127.0.0.1:8848"
+    nacos_namespace: str = "public"
+    nacos_group: str = "DEFAULT_GROUP"
+    nacos_data_id: str = "omr-service.yaml"
+    nacos_service_name: str = "omr-service"
+    nacos_ip: str = ""
+
+    # Redis
+    redis_enabled: bool = True
+    redis_host: str = "127.0.0.1"
+    redis_port: int = 6379
+    redis_db: int = 1
+    redis_password: str = ""
+    redis_stream_job: str = "omr:batch:job"
+    redis_stream_result: str = "omr:batch:result"
+    redis_result_hash_prefix: str = "omr:batch:result:hash"
+
+    # 任务相关
+    consumer_enabled: bool = True
+    worker_pool_size: int = 4
+    sync_timeout_seconds: float = 60.0
+
+    # OMR 内部
+    template_ttl_seconds: int = 3600
+    image_max_bytes: int = 50 * 1024 * 1024
+    crop_output_dir: str = "./output"
+    crop_base_url: str = "http://127.0.0.1:8080/v1/omr_crops"
+
+    # 兼容期
+    legacy_dubbo_port: Optional[int] = None
+
+    @property
+    def health_port(self) -> int:
+        """兼容期: health 端口已合并到 http_port, 仅用作 warning 日志."""
+        return self.http_port
+
+
+def load_settings() -> OmrSettings:
+    """入口: 实例化 OmrSettings. Nacos 合并在 main.py 中处理."""
+    settings = OmrSettings()
+    # 兼容期: 旧 OMR_DUBBO_PORT / OMR_HEALTH_PORT 触发 warning
+    if os.getenv("OMR_DUBBO_PORT"):
+        warnings.warn(
+            "OMR_DUBBO_PORT 已废弃, Dubbo Triple 服务已下线. 请使用 OMR_HTTP_PORT.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+    if os.getenv("OMR_HEALTH_PORT"):
+        warnings.warn(
+            "OMR_HEALTH_PORT 已合并到 OMR_HTTP_PORT, 仅用于 1 版本兼容期.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+    return settings
