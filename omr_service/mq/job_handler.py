@@ -1,4 +1,7 @@
-"""MQ 批量任务处理（Phase 3：单任务 + 重试 + 死信）"""
+"""MQ 批量任务处理（Phase 3：单任务 + 重试 + 死信）
+
+Phase 4 (FastAPI 改造): 通过 OmrService（dict-based，与协议无关）调用核心识别/解析。
+"""
 import logging
 import time
 from typing import Any, Dict, List, Optional
@@ -6,18 +9,17 @@ from typing import Any, Dict, List, Optional
 import numpy as np
 
 from omr_service.config import OmrConfig
+from omr_service.core.service import OmrService
 from omr_service.engine.cropper import SubjectiveCropper
 from omr_service.engine.ocr import PersonalInfoOcr
 from omr_service.engine.personal_info_block_parser import parse_personal_info_block
-from omr_service.engine.recognizer import RecognizeContext
-from omr_service.rpc.omr_service import STUDENT_INFO_BLOCK_FIELD
-from omr_service.engine.recognizers import StandardTemplateRecognizer
-from omr_service.http_server import _make_golden_template_request, _serialize_pb
 from omr_service.loader.image_loader import ImageLoader
 from omr_service.loader.template_store import CachedTemplate, TemplateStore
 from omr_service.mq.producer import MqProducer
-from omr_service.rpc.omr_service import OmrServiceServicer
 from omr_service.worker.pool import WorkerPool
+
+# 考生信息区（整体框选，一次识别姓名/准考证号/考场/座号等）字段标识
+STUDENT_INFO_BLOCK_FIELD = "student_info_block"
 
 logger = logging.getLogger(__name__)
 
@@ -32,14 +34,14 @@ class BatchJobHandler:
         image_loader: ImageLoader,
         worker_pool: WorkerPool,
         producer: MqProducer,
-        servicer: Optional[OmrServiceServicer] = None,
+        service: Optional[OmrService] = None,
     ):
         self.cfg = cfg
         self.template_store = template_store
         self.image_loader = image_loader
         self.worker_pool = worker_pool
         self.producer = producer
-        self.servicer = servicer
+        self.service = service
         self._ocr = PersonalInfoOcr()
         self._cropper = SubjectiveCropper(
             output_dir=cfg.crop_output_dir,
@@ -80,6 +82,9 @@ class BatchJobHandler:
             }
 
         try:
+            from omr_service.engine.recognizer import RecognizeContext
+            from omr_service.engine.recognizers import StandardTemplateRecognizer
+
             recognizer = StandardTemplateRecognizer(standard_template=cached.standard_template)
             ctx = RecognizeContext()
             result = recognizer.recognize(images[0], ctx)
@@ -317,26 +322,28 @@ class BatchJobHandler:
             return {"success": False, "job_id": job_id, "retrying": False}
 
     def _do_parse_golden_template(self, job: Dict[str, Any]) -> Dict[str, Any]:
-        """逐页调用 ParseGoldenTemplate 并合并结果。"""
+        """逐页调用 OmrService.parse_golden_template 并合并结果。"""
         template_id = int(job.get("template_id", 0))
         pages: List[Dict[str, Any]] = job.get("pages", []) or []
         if not pages:
             return {"code": 6, "message": "pages 不能为空"}
 
-        merged_answers: Dict[int, str] = {}
+        if self.service is None:
+            return {"code": 99, "message": "service 未初始化，无法解析黄金模板"}
+
+        merged_answers: Dict[str, str] = {}
         merged_bubbles: List[Dict[str, Any]] = []
         merged_personal_info: List[Dict[str, Any]] = []
         merged_subjective_crops: List[Dict[str, Any]] = []
         total = 0
 
         for page in pages:
-            page["template_id"] = template_id
-            req = _make_golden_template_request(page)
-            if self.servicer is None:
-                return {"code": 99, "message": "servicer 未初始化，无法解析黄金模板"}
-            resp = self.servicer.ParseGoldenTemplate(req, context=None)
-            resp_dict = _serialize_pb(resp)
-            resp_dict.setdefault("code", getattr(resp, "code", 0))
+            request = self._build_parse_request(template_id, page)
+            try:
+                resp_dict = self.service.parse_golden_template(request)
+            except Exception as exc:
+                logger.exception("[mq] 黄金模板解析异常 page=%s", page.get("page_index"))
+                return {"code": 99, "message": str(exc)}
 
             code = resp_dict.get("code", -1)
             if code != 0:
@@ -345,11 +352,26 @@ class BatchJobHandler:
                     "message": resp_dict.get("message", "第 {} 页黄金模板解析失败".format(page.get("page_index", 0) + 1)),
                 }
 
-            merged_answers.update(resp_dict.get("answers", {}) or {})
-            merged_bubbles.extend(resp_dict.get("bubbles", []) or [])
-            merged_personal_info.extend(resp_dict.get("personal_info", []) or [])
-            merged_subjective_crops.extend(resp_dict.get("subjective_crops", []) or [])
-            total += resp_dict.get("total", 0)
+            page_answers = resp_dict.get("answers", []) or []
+            # 新 OmrService 返回 list；旧协议可能返回 dict。统一合并为 dict。
+            if isinstance(page_answers, dict):
+                merged_answers.update(page_answers)
+            else:
+                for ans in page_answers:
+                    q_no = ans.get("question_no") if isinstance(ans, dict) else None
+                    if q_no is None:
+                        continue
+                    selected = ans.get("selected", []) if isinstance(ans, dict) else []
+                    merged_answers[str(q_no)] = ",".join(selected) if selected else ""
+            bubble_grid = resp_dict.get("bubble_grid") or []
+            for b in bubble_grid:
+                merged_bubbles.append(b)
+            personal_info_sample = resp_dict.get("personal_info_sample")
+            if personal_info_sample is not None:
+                merged_personal_info.append(personal_info_sample)
+            subjective_crops = resp_dict.get("subjective_crops") or []
+            merged_subjective_crops.extend(subjective_crops)
+            total += len(page_answers) if isinstance(page_answers, list) else len(page_answers)
 
         return {
             "code": 0,
@@ -364,6 +386,34 @@ class BatchJobHandler:
             "success_count": len(pages),
             "failed_count": 0,
         }
+
+    @staticmethod
+    def _build_parse_request(template_id: int, page: Dict[str, Any]) -> Dict[str, Any]:
+        """将 MQ 任务的 page 信息转换为 OmrService.parse_golden_template 的输入 dict."""
+        columns_raw = page.get("columns", []) or []
+        columns: List[Dict[str, Any]] = []
+        for idx, c in enumerate(columns_raw):
+            # 兼容两层入参：MQ 旧字段名 (x1/y1/x2/y2/startQ/numQ/numOptions)
+            # 与 OmrService 期望字段 (column_id/column_index/question_start/question_count/options_per_question)
+            columns.append({
+                "column_id": c.get("column_id") or c.get("id") or f"col_{idx}",
+                "column_index": int(c.get("column_index", idx)),
+                "question_start": int(c.get("question_start", c.get("startQ", c.get("start_q", 1)))),
+                "question_count": int(c.get("question_count", c.get("numQ", c.get("num_q", 0)))),
+                "options_per_question": int(c.get("options_per_question", c.get("numOptions", c.get("num_options", 4)))),
+                "question_type": c.get("question_type", "single"),
+            })
+
+        request: Dict[str, Any] = {
+            "template_id": template_id,
+            "template_image_url": page.get("template_image_url") or page.get("templateImageUrl"),
+            "columns": columns,
+        }
+        if page.get("personal_info_region"):
+            request["personal_info_region"] = page["personal_info_region"]
+        if page.get("subjective_regions"):
+            request["subjective_regions"] = page["subjective_regions"]
+        return request
 
     def _build_parse_success_payload(
         self,
