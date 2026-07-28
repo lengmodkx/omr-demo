@@ -9,6 +9,29 @@ from omr_service.mq.client import MqClient
 logger = logging.getLogger(__name__)
 
 
+def enqueue_job(
+    *,
+    task_type: str,
+    payload: dict,
+    task_id: str,
+    cfg: Optional[OmrConfig] = None,
+) -> str:
+    """便捷函数: 把异步任务投递到 Redis Stream.
+
+    由 API router 调用, 0 改动 OmrConfig / consumer / job_handler.
+    payload 形状:
+        {"task_id": ..., "job_type": task_type, ...payload}
+    """
+    from omr_service.config import get_config
+    effective_cfg = cfg or get_config()
+    producer = MqProducer(effective_cfg).connect()
+    try:
+        body = {"task_id": task_id, "job_type": task_type, **payload}
+        return producer.send_job(payload=body)
+    finally:
+        producer.close()
+
+
 class MqProducer:
     """发送识别结果到 Redis Stream"""
 
