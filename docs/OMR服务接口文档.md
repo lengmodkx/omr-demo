@@ -1,54 +1,67 @@
 # OMR Python 服务接口文档
 
-> 服务名：`omr-service`  
-> 协议：gRPC（兼容 Dubbo Triple）  
-> 接口名：`omr.OmrService`  
-> proto 文件：`omr_service/rpc/omr.proto`
+> 服务名：`omr-service`
+> 协议：FastAPI HTTP（基于 uvicorn）
+> 入口：`omr_service/main.py` 启动的 FastAPI `app`
+> 监听端口：`8080`（可通过 `OMR_HTTP_HOST` / `OMR_HTTP_PORT` 修改）
 
 ## 1. 服务发现
 
 ### Nacos 注册信息
 
 - **应用级服务名**：`omr-service`
-- **接口级服务名**：`providers:omr.OmrService::`
 - **分组**：`DEFAULT_GROUP`（默认，可通过 `NACOS_GROUP_NAME` 修改）
-- **协议**：`tri`（Dubbo Triple，即 gRPC over HTTP/2）
-- **默认端口**：`20884`
+- **协议**：HTTP（FastAPI / uvicorn）
+- **默认端口**：`8080`
+- **健康检查路径**：`/v1/health`
 
-### Java / Dubbo 消费端配置
+### 消费端配置（HTTP）
+
+Nacos 注册仅作服务发现用途，消费端通过 HTTP 调用 OMR 接口，
+不再使用 Dubbo Triple / gRPC 客户端。
 
 ```yaml
-dubbo:
-  application:
-    name: ruoyi-exam-admin
-    service-discovery:
-      migration: FORCE_INTERFACE   # 强制接口级发现
-  registry:
-    address: nacos://39.153.154.183:8848
-  consumer:
-    protocol: tri
-    timeout: 10000
+spring:
+  cloud:
+    nacos:
+      discovery:
+        server-addr: 39.153.154.183:8848
 ```
 
 ```java
-@DubboReference(version = "1.0.0", group = "DEFAULT_GROUP", protocol = "tri")
-private OmrService omrService;
+// 使用 RestTemplate / WebClient / OpenFeign 访问 omr-service
+String url = "http://omr-service:8080/v1/recognize";
 ```
 
-## 2. RPC 方法概览
+## 2. HTTP 接口概览
 
-| 方法 | 请求 | 响应 | 说明 |
+| Method | Path | 用途 |
+|--------|------|------|
+| POST | `/v1/recognize` | 同步识别单张答题卡 |
+| POST | `/v1/templates/parse` | 同步解析黄金模板 |
+| POST | `/v1/verify_recognition_rate` | 暂返 `501 Not Implemented` |
+| POST | `/v1/reverify_paper` | 与 `recognize` 行为等价的复验接口 |
+| POST | `/v1/tasks` | 异步任务投递（`202 Accepted`） |
+| GET  | `/v1/tasks/{task_id}` | 异步任务状态查询 |
+| GET  | `/v1/health` | 存活探针 |
+| GET  | `/v1/health/ready` | 就绪探针 |
+| GET  | `/v1/omr_crops/{file_path:path}` | 静态裁剪图访问 |
+| GET  | `/v1/docs` | Swagger UI |
+| GET  | `/v1/openapi.json` | OpenAPI Schema |
+
+## 3. 请求 / 响应 Schema
+
+### 3.1 `POST /v1/templates/parse`（解析黄金模板）
+
+请求 `GoldenTemplateRequest`：
+
+| 字段 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| `ParseGoldenTemplate` | `GoldenTemplateRequest` | `GoldenTemplateResult` | 解析黄金模板 |
-| `RecognizeByTemplate` | `RecognizeRequest` | `RecognizeResult` | 识别单张答题卡 |
-| `VerifyRecognitionRate` | `VerifyRateRequest` | `VerifyRateResult` | 验证模板识别成功率 |
-| `ReverifyPaper` | `RecognizeRequest` | `RecognizeResult` | 单张试卷复验（语义层） |
+| `template_id` | int64 | 是 | 模板唯一标识，后续识别复用 |
+| `template_image_url` | string | 是 | 模板图片 URL（PNG/JPG） |
+| `columns` | ColumnConfig[] | 是 | 列框配置列表，至少一个 |
 
-## 3. 消息定义
-
-### ColumnConfig（列框配置）
-
-一个答题卡区域的气泡排列配置，与 `StandardTemplate._generate_grid` 参数一一对应。
+`ColumnConfig`：
 
 | 字段 | 类型 | 必填 | 说明 |
 |------|------|------|------|
@@ -62,26 +75,18 @@ private OmrService omrService;
 | `option_axis` | string | 否 | 选项排列方向：`"x"` 竖排题；`"y"` 横排题 |
 | `reverse_q` | bool | 否 | 题号是否倒序 |
 
-### GoldenTemplateRequest（解析黄金模板请求）
-
-| 字段 | 类型 | 必填 | 说明 |
-|------|------|------|------|
-| `template_id` | int64 | 是 | 模板唯一标识，后续识别复用 |
-| `template_image_url` | string | 是 | 模板图片 URL（PNG/JPG） |
-| `columns` | repeated ColumnConfig | 是 | 列框配置列表，至少一个 |
-
-### GoldenTemplateResult（解析黄金模板响应）
+响应 `GoldenTemplateResult`：
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
 | `code` | int32 | `0` 成功；非 0 见错误码表 |
 | `message` | string | 结果说明 |
 | `template_id` | int64 | 模板 ID |
-| `bubbles` | repeated Bubble | 检测到的所有气泡 |
+| `bubbles` | Bubble[] | 检测到的所有气泡 |
 | `answers` | map<int32, string> | 标准答案，key 为题号 |
 | `total` | int32 | 气泡总数 |
 
-#### Bubble
+`Bubble`：
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
@@ -92,7 +97,9 @@ private OmrService omrService;
 | `w` | int32 | 宽度 |
 | `h` | int32 | 高度 |
 
-### RecognizeRequest（识别请求）
+### 3.2 `POST /v1/recognize` / `/v1/reverify_paper`（识别）
+
+请求 `RecognizeRequest`：
 
 | 字段 | 类型 | 必填 | 说明 |
 |------|------|------|------|
@@ -100,7 +107,7 @@ private OmrService omrService;
 | `scan_image_url` | string | 是 | 待识别答题卡图片 URL |
 | `question_no` | int32 | 否 | `0` 表示整张识别；非 0 为单题复验（预留） |
 
-### RecognizeResult（识别响应）
+响应 `RecognizeResult`：
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
@@ -108,14 +115,14 @@ private OmrService omrService;
 | `message` | string | 结果说明 |
 | `template_id` | int64 | 模板 ID |
 | `scan_image_url` | string | 被识别的图片 URL |
-| `answers` | repeated QuestionAnswer | 每题识别结果 |
+| `answers` | QuestionAnswer[] | 每题识别结果 |
 | `total` | int32 | 总题数 |
 | `empty_count` | int32 | 空选数量 |
 | `multi_count` | int32 | 多选数量 |
 | `card_flag` | string | 异常标记：`abnormal` / `suspicious_blank` / `invalid_image` / `""` |
 | `duration_ms` | int32 | 识别耗时（毫秒） |
 
-#### QuestionAnswer
+`QuestionAnswer`：
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
@@ -124,15 +131,19 @@ private OmrService omrService;
 | `status` | string | `single` / `multi` / `empty` / `uncertain` |
 | `correct` | bool | 是否正确（复验/成功率验证场景使用） |
 
-### VerifyRateRequest（验证成功率请求）
+### 3.3 `POST /v1/verify_recognition_rate`（成功率验证）
+
+> 当前实现：直接返回 `501 Not Implemented`，待后续版本提供。
+
+请求 `VerifyRateRequest`：
 
 | 字段 | 类型 | 必填 | 说明 |
 |------|------|------|------|
 | `template_id` | int64 | 是 | 模板 ID |
-| `image_urls` | repeated string | 是 | 已知答案的样本图片 URL 列表 |
+| `image_urls` | string[] | 是 | 已知答案的样本图片 URL 列表 |
 | `expected_answers` | map<int32, string> | 是 | 标准答案，key 为题号，value 为 `"A"` 或 `"ABC"` 等 |
 
-### VerifyRateResult（验证成功率响应）
+响应 `VerifyRateResult`：
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
@@ -141,99 +152,156 @@ private OmrService omrService;
 | `success_rate` | float | 成功率 `0.0 ~ 1.0` |
 | `total` | int32 | 样本总数 |
 | `matched` | int32 | 匹配数 |
-| `details` | repeated RecognizeResult | 每张样本的详细识别结果 |
+| `details` | RecognizeResult[] | 每张样本的详细识别结果 |
+
+### 3.4 `POST /v1/tasks`（异步任务投递）
+
+请求 `TaskSubmitRequest`：
+
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `template_id` | int64 | 是 | 黄金模板 ID |
+| `image_urls` | string[] | 是 | 待识别图片 URL 列表 |
+| `callback_url` | string | 否 | 可选结果回调 URL |
+
+响应 `TaskCreatedResponse`（`202 Accepted`）：
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `task_id` | string | 任务 ID（UUID） |
+| `status` | string | 任务初始状态，例如 `pending` |
+
+### 3.5 `GET /v1/tasks/{task_id}`（异步任务查询）
+
+响应 `TaskStatusResponse`：
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `task_id` | string | 任务 ID |
+| `status` | string | `pending` / `running` / `completed` / `failed` |
+| `progress` | int32 | 已完成数量 |
+| `total` | int32 | 总数量 |
+| `results` | RecognizeResult[] | 已完成的识别结果 |
+| `error` | string | 失败时的错误信息 |
+
+### 3.6 `GET /v1/health` / `GET /v1/health/ready`
+
+存活：
+
+```json
+{ "status": "ok" }
+```
+
+就绪：
+
+```json
+{ "status": "ready", "components": { "redis": "ok", "template_store": "ok" } }
+```
+
+### 3.7 `GET /v1/omr_crops/{file_path:path}`
+
+返回静态裁剪图文件（image/png 等），由 `OMR_CROP_OUTPUT_DIR` 指定的本地目录提供。
 
 ## 4. 错误码
+
+业务层 `code` 字段：
 
 | 错误码 | 含义 | 常见原因 |
 |--------|------|----------|
 | `0` | 成功 | - |
-| `4` | 模板未找到 | `template_id` 未调用 `ParseGoldenTemplate` 解析 |
+| `4` | 模板未找到 | `template_id` 未调用 `/v1/templates/parse` 解析 |
 | `5` | 图片加载失败 | URL 无效、OSS 权限、图片过大/损坏 |
 | `6` | 请求参数非法 | `template_id` 为 0、URL 为空、`columns` 为空等 |
 | `99` | 内部错误 | 识别异常，需查看服务端日志 |
 
+HTTP 层（FastAPI 默认行为）：
+
+| 状态码 | 含义 |
+|--------|------|
+| `200` | 成功 |
+| `400` | 请求体校验失败 |
+| `404` | 资源不存在（如 task_id 未找到） |
+| `422` | 字段类型/取值错误 |
+| `500` | 未捕获的内部异常 |
+| `501` | 接口未实现（如 `verify_recognition_rate`） |
+| `502` | 上游（图片下载、Redis）失败 |
+
 ## 5. 调用示例
 
-### 5.1 Java / Dubbo
-
-```java
-// 1. 解析黄金模板
-GoldenTemplateRequest tplReq = GoldenTemplateRequest.newBuilder()
-    .setTemplateId(1001L)
-    .setTemplateImageUrl("https://oss/template.jpg")
-    .addColumns(ColumnConfig.newBuilder()
-        .setX1(100).setY1(200).setX2(300).setY2(800)
-        .setStartQ(1).setNumQ(5).setNumOptions(4)
-        .setOptionAxis("x")
-        .build())
-    .build();
-GoldenTemplateResult tplRes = omrService.parseGoldenTemplate(tplReq);
-
-// 2. 识别答题卡
-RecognizeRequest recReq = RecognizeRequest.newBuilder()
-    .setTemplateId(1001L)
-    .setScanImageUrl("https://oss/scan.jpg")
-    .build();
-RecognizeResult recRes = omrService.recognizeByTemplate(recReq);
-```
-
-### 5.2 Python 直连
-
-```python
-import grpc
-from omr_service.rpc import omr_pb2, omr_pb2_grpc
-
-channel = grpc.insecure_channel("192.168.31.229:20884")
-stub = omr_pb2_grpc.OmrServiceStub(channel)
-
-req = omr_pb2.RecognizeRequest(
-    template_id=1001,
-    scan_image_url="https://oss/scan.jpg",
-)
-resp = stub.RecognizeByTemplate(req)
-print(resp)
-```
-
-### 5.3 Python Tag 感知客户端（推荐本地调试）
+### 5.1 curl（HTTP）
 
 ```bash
-python -m omr_service.rpc.tag_aware_client \
-    --method RecognizeByTemplate \
-    --tag zhangsan \
-    --template-id 1001 \
-    --image-url "https://oss/scan.jpg"
+# 1. 解析黄金模板
+curl -X POST http://localhost:8080/v1/templates/parse \
+  -H "Content-Type: application/json" \
+  -d '{
+    "template_id": 1001,
+    "template_image_url": "https://oss/template.jpg",
+    "columns": [{
+      "x1": 100, "y1": 200, "x2": 300, "y2": 800,
+      "start_q": 1, "num_q": 5, "num_options": 4,
+      "option_axis": "x"
+    }]
+  }'
+
+# 2. 识别答题卡
+curl -X POST http://localhost:8080/v1/recognize \
+  -H "Content-Type: application/json" \
+  -d '{
+    "template_id": 1001,
+    "scan_image_url": "https://oss/scan.jpg"
+  }'
+
+# 3. 健康检查
+curl http://localhost:8080/v1/health
 ```
+
+### 5.2 Python（requests）
+
+```python
+import requests
+
+BASE = "http://localhost:8080"
+
+resp = requests.post(f"{BASE}/v1/recognize", json={
+    "template_id": 1001,
+    "scan_image_url": "https://oss/scan.jpg",
+}, timeout=30)
+resp.raise_for_status()
+print(resp.json())
+```
+
+### 5.3 Swagger UI
+
+打开浏览器访问 `http://<host>:8080/v1/docs` 查看交互式 API 文档，
+或在 `http://<host>:8080/v1/openapi.json` 拉取 OpenAPI Schema。
 
 ## 6. Tag 路由隔离（本地调试）
 
 多人共用同一 Nacos 时，为避免请求打到他人本地实例：
 
 1. 本地启动前设置 Tag：
-   ```powershell
-   $env:OMR_SERVICE_TAG="zhangsan"
+   ```bash
+   export OMR_SERVICE_TAG=zhangsan
    python -m omr_service.main
    ```
-2. Java 消费端调用时设置：
-   ```java
-   RpcContext.getContext().setAttachment("dubbo.tag", "zhangsan");
+2. 消费端在 HTTP Header 中携带 Tag，网关层把 Tag 转发到 OMR 服务的请求 header：
    ```
-3. Python 消费端调用时在 metadata 中携带：
-   ```python
-   stub.RecognizeByTemplate(req, metadata=[("x-service-tag", "zhangsan")])
+   x-service-tag: zhangsan
    ```
-
-Provider 注册时会在 Nacos 元数据中写入 `tag=zhangsan` 和 `dubbo.tag=zhangsan`。消费端优先选择相同 Tag 的实例，未命中则 fallback 到空 Tag 的基线实例。
+3. Provider 注册时会在 Nacos 实例 metadata 中写入 `tag=zhangsan`。
+   消费端（API Gateway / Load Balancer）按 `metadata.tag` 过滤，
+   命中则在这些实例中负载均衡，未命中则 fallback 到空 Tag 的基线实例。
 
 ## 7. 健康检查
 
-- **地址**：`http://<ip>:9173/health`
-- **方法**：`GET`
-- **成功响应**：`{"status":"ok"}`
+- **存活**：`GET http://<ip>:8080/v1/health` → `{"status":"ok"}`
+- **就绪**：`GET http://<ip>:8080/v1/health/ready`
+- Nacos 健康检查路径同样配置为 `/v1/health`。
 
 ## 8. Redis Stream 批量任务（可选）
 
-除了 gRPC 单张调用，也支持通过 Redis Stream 批量下发任务。
+除了同步 HTTP 调用，也支持通过 Redis Stream 批量下发任务。
 
 ### 任务消息格式（admin → omr-service）
 
