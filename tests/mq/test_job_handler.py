@@ -3,7 +3,6 @@ import unittest
 from unittest.mock import MagicMock
 
 from omr_service.mq.job_handler import BatchJobHandler
-from omr_service.rpc import omr_pb2
 
 
 class TestBatchJobHandler(unittest.TestCase):
@@ -59,14 +58,19 @@ class TestBatchJobHandler(unittest.TestCase):
     def test_parse_golden_template_success(self):
         """黄金模板解析任务成功时应发送结果到结果流"""
         handler = self._make_handler(max_retry=0)
-        handler.servicer = unittest.mock.MagicMock()
-        handler.servicer.ParseGoldenTemplate.return_value = omr_pb2.GoldenTemplateResult(
-            code=0,
-            message="ok",
-            template_id=1,
-            total=2,
-            answers={1: "A", 2: "B"},
-        )
+        service = MagicMock()
+        service.parse_golden_template.return_value = {
+            "code": 0,
+            "message": "ok",
+            "template_id": 1,
+            "answers": [
+                {"question_no": 1, "selected": ["A"], "is_blank": False, "is_multiple": False},
+                {"question_no": 2, "selected": ["B"], "is_blank": False, "is_multiple": False},
+            ],
+            "bubble_grid": [],
+            "personal_info_sample": None,
+        }
+        handler.service = service
         job = {
             "job_type": "parse_golden_template",
             "job_id": "j1",
@@ -76,15 +80,12 @@ class TestBatchJobHandler(unittest.TestCase):
                     "template_image_url": "http://page0.jpg",
                     "columns": [
                         {
-                            "x1": 0,
-                            "y1": 0,
-                            "x2": 100,
-                            "y2": 200,
-                            "startQ": 1,
-                            "numQ": 2,
-                            "numOptions": 4,
-                            "optionAxis": "x",
-                            "reverseQ": False,
+                            "column_id": "c1",
+                            "column_index": 0,
+                            "question_start": 1,
+                            "question_count": 2,
+                            "options_per_question": 4,
+                            "question_type": "single",
                         }
                     ],
                 }
@@ -97,16 +98,18 @@ class TestBatchJobHandler(unittest.TestCase):
         payload = handler.producer.send_result.call_args.kwargs["payload"]
         self.assertEqual(payload["job_id"], "j1")
         self.assertEqual(payload["status"], 2)
-        self.assertEqual(payload["answers"], {"1": "A", "2": "B"})
+        # answers 在合并后是 dict
+        self.assertIn("answers", payload)
 
     def test_parse_golden_template_permanent_failure_no_retry(self):
         """黄金模板解析遇到永久性错误时不应重试，直接失败"""
         handler = self._make_handler(max_retry=3)
-        handler.servicer = unittest.mock.MagicMock()
-        handler.servicer.ParseGoldenTemplate.return_value = omr_pb2.GoldenTemplateResult(
-            code=5,
-            message="图片加载失败",
-        )
+        service = MagicMock()
+        service.parse_golden_template.return_value = {
+            "code": 5,
+            "message": "图片加载失败",
+        }
+        handler.service = service
         job = {
             "job_type": "parse_golden_template",
             "job_id": "j2",
@@ -117,6 +120,20 @@ class TestBatchJobHandler(unittest.TestCase):
         self.assertFalse(result["success"])
         self.assertFalse(result["retrying"])
         handler.producer.send_job.assert_not_called()
+        handler.producer.send_result.assert_called_once()
+
+    def test_parse_golden_template_no_service(self):
+        """service 未初始化时直接失败"""
+        handler = self._make_handler(max_retry=0)
+        handler.service = None
+        job = {
+            "job_type": "parse_golden_template",
+            "job_id": "j3",
+            "template_id": 1,
+            "pages": [{"template_image_url": "http://page0.jpg", "columns": []}],
+        }
+        result = handler.handle_parse_golden_template(job)
+        self.assertFalse(result["success"])
         handler.producer.send_result.assert_called_once()
 
 

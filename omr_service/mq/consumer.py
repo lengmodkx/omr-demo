@@ -1,4 +1,7 @@
-"""Redis Stream 批量任务消费者（Phase 3：背压 + 单任务 + 重试）"""
+"""Redis Stream 批量任务消费者（Phase 3：背压 + 单任务 + 重试）
+
+Phase 4 (FastAPI 改造): 通过 OmrService（dict-based，与协议无关）调用核心识别/解析。
+"""
 import json
 import logging
 import threading
@@ -8,12 +11,12 @@ from typing import Any, Dict, List, Optional, Tuple
 import redis
 
 from omr_service.config import OmrConfig
+from omr_service.core.service import OmrService
 from omr_service.loader.image_loader import ImageLoader
 from omr_service.loader.template_store import TemplateStore
 from omr_service.mq.client import MqClient
 from omr_service.mq.job_handler import BatchJobHandler
 from omr_service.mq.producer import MqProducer
-from omr_service.rpc.omr_service import OmrServiceServicer
 from omr_service.worker.pool import WorkerPool
 
 logger = logging.getLogger(__name__)
@@ -28,13 +31,13 @@ class MqConsumer:
         template_store: TemplateStore,
         image_loader: ImageLoader,
         worker_pool: WorkerPool,
-        servicer: Optional[OmrServiceServicer] = None,
+        service: Optional[OmrService] = None,
     ):
         self.cfg = cfg
         self.template_store = template_store
         self.image_loader = image_loader
         self.worker_pool = worker_pool
-        self.servicer = servicer
+        self.service = service
         self._client: Optional[MqClient] = None
         self._producer: Optional[MqProducer] = None
         self._handler: Optional[BatchJobHandler] = None
@@ -91,7 +94,7 @@ class MqConsumer:
                 self.image_loader,
                 self.worker_pool,
                 self._producer,
-                servicer=self.servicer,
+                service=self.service,
             )
 
             while not self._stop_event.is_set():
@@ -231,3 +234,43 @@ class MqConsumer:
             r.xdel(self.cfg.redis_job_stream, msg_id)
         except Exception as e:
             logger.warning("确认消息失败 %s: %s", msg_id, e)
+
+
+def start_consumer_thread(
+    service: OmrService,
+    settings: Any,
+) -> threading.Thread:
+    """启动 Redis Stream 消费者线程（FastAPI 启动入口调用）.
+
+    Args:
+        service: 已初始化的 OmrService 实例。
+        settings: OmrSettings，包含 redis/consumer 相关配置。
+
+    Returns:
+        启动的 daemon Thread.
+    """
+    template_store = TemplateStore(ttl_seconds=getattr(settings, "template_ttl_seconds", 300))
+    image_loader = ImageLoader(max_bytes=getattr(settings, "image_max_bytes", 10 * 1024 * 1024))
+    worker_pool = WorkerPool(size=getattr(settings, "worker_pool_size", 4))
+
+    cfg = OmrConfig.from_env()
+    cfg.redis_job_stream = settings.redis_job_stream
+    cfg.redis_consumer_group = settings.redis_consumer_group
+    cfg.redis_consumer_name = settings.redis_consumer_name
+    cfg.omr_max_inflight = getattr(settings, "consumer_max_inflight", 8)
+    cfg.omr_batch_size = getattr(settings, "consumer_batch_size", 4)
+    cfg.omr_single_task_timeout_sec = getattr(settings, "consumer_task_timeout_sec", 60)
+
+    consumer = MqConsumer(
+        cfg=cfg,
+        template_store=template_store,
+        image_loader=image_loader,
+        worker_pool=worker_pool,
+        service=service,
+    )
+    consumer.start()
+    # 后台线程持久引用，避免 GC
+    consumer._worker_pool = worker_pool
+    consumer._template_store = template_store
+    consumer._image_loader = image_loader
+    return consumer._thread  # type: ignore[return-value]
