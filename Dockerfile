@@ -1,49 +1,20 @@
-# ============================================================
-# 答题卡智能处理系统 (OMR Service) — Docker 镜像
-# 轻量版（不含 YOLO，镜像 ~500MB）
-# ============================================================
-FROM python:3.11-slim-bookworm
+FROM python:3.12-slim-bookworm
+RUN sed -i 's|deb.debian.org|mirrors.ustc.edu.cn|g' /etc/apt/sources.list.d/*.list || true
 
-LABEL maintainer="lengmodkx"
-LABEL description="OMR答题卡识别系统 - Streamlit（无YOLO轻量版）"
-
-# ---- 系统依赖 ----
-# libzbar0:  条形码扫描 (pyzbar)
-# libjpeg-dev: JPEG 图片处理
-# zlib1g-dev: 压缩支持
-# libgl1:     OpenCV 兜底 GL 库（headless 不需要但以防万一）
-# libgomp1:   OpenCV 并行运行时
-# 切换 Debian 源为国内镜像（避免官方源 502/超时）
-RUN sed -i 's|http://deb.debian.org/debian|https://mirrors.ustc.edu.cn/debian|g' /etc/apt/sources.list.d/debian.sources \
-    && apt-get update \
-    && apt-get install -y --no-install-recommends \
-        libzbar0 \
-        libjpeg-dev \
-        zlib1g-dev \
-        libgl1 \
-        libgomp1 \
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libzbar0 libjpeg-dev zlib1g-dev libgl1 libgomp1 curl \
     && rm -rf /var/lib/apt/lists/*
 
-# ---- Python 依赖 ----
 WORKDIR /app
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt -i https://mirrors.aliyun.com/pypi/simple/
 
-# 使用根目录轻量 requirements（不含 torch/ultralytics）
-COPY requirements.txt /app/requirements.txt
-RUN pip install --no-cache-dir -r requirements.txt
+COPY omr_service/ ./omr_service/
+COPY .env.example .env.example
 
-# ---- 应用代码 ----
-COPY . /app/
+EXPOSE 8080
 
-# ---- Streamlit 配置 ----
-RUN mkdir -p /app/.streamlit
-COPY .streamlit/config.toml /app/.streamlit/config.toml
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+    CMD curl -f http://localhost:8080/v1/health || exit 1
 
-# ---- 运行时 ----
-EXPOSE 8501
-
-HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
-    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8501/_stcore/health')" || exit 1
-
-ENTRYPOINT ["streamlit", "run", "omr_demo/app.py"]
-CMD ["--server.port=8501", "--server.address=0.0.0.0", \
-     "--server.enableCORS=false", "--server.enableXsrfProtection=false"]
+ENTRYPOINT ["uvicorn", "omr_service.main:app", "--host", "0.0.0.0", "--port", "8080", "--workers", "1"]

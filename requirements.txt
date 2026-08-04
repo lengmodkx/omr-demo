@@ -1,8 +1,35 @@
-streamlit==1.39.1
+# OMR Python Service Dependencies
+#
+# Windows install guide (see README.md for details):
+#   pip install -r requirements.txt
+#   pip install --no-deps -r requirements-nacos.txt
+#   python scripts/patch_nacos_protobuf.py
+
 opencv-python-headless>=4.8
-numpy>=1.24
+numpy==1.26.4
 pandas>=2.0
 pyzbar>=0.1.9
 Pillow>=10.0,<11
 openpyxl>=3.1
+grpcio>=1.60.0
+redis>=5.0.0
+pyyaml>=6.0
+python-dotenv>=1.0.0
+requests>=2.31.0
+tenacity>=8.0.0
+pydantic>=2.10.4
+paddlepaddle==2.6.2
+paddleocr==2.7.3
+protobuf==3.20.2
 streamlit-drawable-canvas>=0.9
+
+# FastAPI migration P0
+fastapi>=0.115.0
+uvicorn[standard]>=0.32.0
+pydantic-settings>=2.6.0
+
+# Tests
+pytest>=8.0.0
+pytest-asyncio>=0.24.0
+pytest-cov>=6.0.0
+httpx>=0.27.0

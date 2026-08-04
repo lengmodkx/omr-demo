@@ -1,94 +1,108 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
-
 ## Overview
 
-This is an **OMR (Optical Mark Recognition) system** for automated answer sheet scanning and recognition. It uses Python + OpenCV + Streamlit to identify multiple choice answers, detect barcodes (student IDs), and crop subjective question regions from scanned answer sheets.
+This repository is a Python-based OMR (Optical Mark Recognition) microservice.
+It replaces the previous Streamlit demo and the abandoned Go service direction.
+
+The service exposes:
+- **FastAPI HTTP** endpoints (uvicorn on `:8080`) for template parsing, recognition, verification, re-verification, and async task management.
+- **Redis Stream** consumer/producer for batch image recognition jobs.
+- **Nacos** for both service registration/discovery and configuration management.
 
 ## Commands
 
 ```bash
-# Install dependencies
-cd omr_demo
+# Setup
+python -m venv .venv
+source .venv/Scripts/activate
 pip install -r requirements.txt
 
-# Run the Streamlit application
-python -m streamlit run app.py
+# Run service (main.py boots uvicorn under the hood)
+python -m omr_service.main
+# Or run uvicorn directly:
+# uvicorn omr_service.main:app --host 0.0.0.0 --port 8080
+
+# Regenerate API schemas is not required — FastAPI derives them from Pydantic models
+# under omr_service/api/schemas/ at startup.
+
+# Run tests (pytest; tests/ directory per pytest.ini testpaths)
+python -m pytest -v
+
+# Docker
+docker compose build
+docker compose up -d
 ```
+
+## Configuration
+
+Configuration priority: **Nacos > environment variables > defaults**.
+
+Create a Nacos config:
+- dataId: `omr-service.yaml`
+- group: `DEFAULT_GROUP`
+
+Example:
+
+```yaml
+nacos_server: 127.0.0.1:8848
+nacos_namespace: public
+redis:
+  host: 47.99.83.217
+  port: 6379
+  password: your_password
+  db: 1
+omr_worker_count: 4
+```
+
+The loader in `config.py` flattens nested YAML keys (e.g. `redis.host`).
 
 ## Architecture
 
-### Core Processing (`omr_demo/core/processor.py`)
+### FastAPI App (`omr_service/api/app.py`)
 
-The `CardProcessor` class is the central engine:
+`create_app()` builds a FastAPI instance with:
+- `/v1/recognize`, `/v1/templates/parse`, `/v1/reverify_paper`, `/v1/verify_recognition_rate`
+- `/v1/tasks`, `/v1/tasks/{task_id}`
+- `/v1/health`, `/v1/health/ready`
+- `/v1/omr_crops/{file_path:path}`
+- `/v1/docs` (Swagger UI), `/v1/openapi.json`
 
-1. **Template System** — JSON templates define bubble positions, barcode regions, and subjective areas for specific answer sheet formats. Templates use reference dimensions (`ref_w`, `ref_h`) and coordinate scaling to adapt to different scan resolutions.
+Routers live under `omr_service/api/routers/`, Pydantic schemas under `omr_service/api/schemas/`.
 
-2. **Recognition Methods**:
-   - **Differential method** — Compares filled answer sheet against blank reference to detect marks (more accurate)
-   - **Fixed threshold method** — Direct binarization and pixel ratio analysis (no blank reference needed)
+### Core Service (`omr_service/core/service.py`)
 
-3. **A/B Page Handling** — Answer sheets have two sides (A and B). Files are paired by naming convention (`xxx01A.jpg`, `xxx01B.jpg`). Processing rules:
-   - Template barcode detection on A page
-   - OMR bubble recognition on A page
-   - Subjective area cropping on both pages
+`OmrService` wraps the engine and is invoked synchronously from the FastAPI handlers
+and asynchronously from the Redis Stream consumer.
 
-4. **Manual Region Overrides** — User-defined regions can replace template behavior:
-   - `选择题` (Multiple Choice) — Region-specific bubble recognition
-   - `个人信息` (Personal Info) — Region-specific barcode detection
-   - `非选择题` (Non-Choice) — Pure cropping without recognition
+### Redis Batch Flow (`omr_service/mq/`)
 
-### Streamlit UI (`omr_demo/app.py`)
+- `consumer.py` reads from Redis Stream `omr:batch:job` using a consumer group.
+- `job_handler.py` processes jobs concurrently and writes results to `omr:batch:result`.
 
-Three main tabs:
-- **Tab 1 (模板与参考)** — Load templates, set blank references, configure manual regions, define paper layouts with grid-based bubble generation
-- **Tab 2 (批量处理)** — Batch process A/B paired answer sheets
-- **Tab 3 (结果核对与导出)** — Review results, apply manual corrections, export Excel score reports
+### Nacos (`omr_service/nacos_config.py`, `omr_service/nacos_reg.py`)
 
-### Paper Layouts (半自动网格)
-
-A newer feature for new paper formats without pre-defined bubbles. Users draw column rectangles on a sample image, specify row/column counts and thresholds, and the system auto-generates a grid of bubble detection points.
+- Config client pulls config at startup and optionally listens for changes.
+- Registrator registers the HTTP instance under the app-level service name `omr-service`
+  with metadata containing the local debug Tag.
 
 ## Key Implementation Details
 
 ### Coordinate Scaling
 
-Coordinates in templates use reference dimensions. The `scale_coords()` method scales them to actual image sizes:
-```python
-sx = int(x * img_w / self.ref_w)
-sy = int(y * img_h / self.ref_h)
-```
+Template coordinates are based on reference image dimensions and scaled at runtime.
 
-Manual regions also scale from their `ref_size` (the dimensions of the image used during calibration).
+### Golden Template Grid Generation
+
+`StandardTemplate._generate_grid()` supports `option_axis` and `reverse_q`.
 
 ### Windows Chinese Path Handling
 
-`cv2.imwrite()` has UTF-8 encoding issues on Windows. The codebase uses `cv2.imencode + open(filepath, 'wb')` instead for saving cropped images.
+`cv2.imwrite()` has UTF-8 issues on Windows. The engine uses `cv2.imencode + open(filepath, 'wb')`.
 
-### OMR Threshold
+## Adding New HTTP Endpoints
 
-Default `threshold=0.15` (15% dark pixel ratio). Adjust based on:
-- Too many missed detections → lower threshold (0.05–0.10)
-- Too many false positives → raise threshold (0.20–0.30)
-
-### Template Structure
-
-```json
-{
-  "name": "template_name",
-  "image_size": {"w": 1237, "h": 1741},
-  "pages": {
-    "A": {
-      "barcode": {"x": 730, "y": 220, "w": 280, "h": 80},
-      "bubbles": [{"q": 1, "opt": "A", "x": 248, "y": 517, "w": 12, "h": 12}, ...],
-      "subjective": {"42": {"x1": 120, "y1": 1100, "x2": 1120, "y2": 1200, "score": 2}, ...}
-    },
-    "B": { ... }
-  }
-}
-```
-
-## File Pairing Convention
-
-Batch processing expects filenames ending with `A.jpg` (or `A.jpeg`, `A.png`) and `B.jpg` for the two sides of the same answer sheet. The base name is extracted by removing the last character before the extension.
+1. Define a Pydantic request/response model under `omr_service/api/schemas/`.
+2. Add a handler function to the appropriate router in `omr_service/api/routers/`.
+3. If the router does not exist yet, create it and include it in `omr_service/api/app.py`.
+4. Add a test under `tests/` (e.g. `tests/api/`) using FastAPI's `TestClient`.

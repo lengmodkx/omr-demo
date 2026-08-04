@@ -1,0 +1,14 @@
+omr-service:
+  omr:
+    http_host: 0.0.0.0
+    http_port: 8080
+    log_level: INFO
+    redis:
+      host: redis
+      port: 6379
+      db: 4
+      stream_job: omr:batch:job
+      stream_result: omr:batch:result
+      result_hash_prefix: omr:batch:result:hash
+    worker_pool_size: 4
+    consumer_enabled: true
