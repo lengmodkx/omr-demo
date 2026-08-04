@@ -77,6 +77,8 @@ class OmrConfig:
     omr_max_retry: int = 3
     omr_retry_delay_sec: int = 1
     omr_single_task_timeout_sec: int = 60
+    # 个人信息 OCR / 主观题裁剪单步超时（秒）：超时跳过该步，不阻塞任务回写
+    ocr_timeout_seconds: float = 30.0
 
     # 服务元数据
     # 留空字符串：与 Java 端 @DubboReference 默认 version="" 对齐。
@@ -155,6 +157,7 @@ class OmrConfig:
             omr_max_retry=_get("omr_max_retry", "OMR_MAX_RETRY", 3, int),
             omr_retry_delay_sec=_get("omr_retry_delay_sec", "OMR_RETRY_DELAY_SEC", 1, int),
             omr_single_task_timeout_sec=_get("omr_single_task_timeout_sec", "OMR_SINGLE_TASK_TIMEOUT_SEC", 60, int),
+            ocr_timeout_seconds=_get("ocr_timeout_seconds", "OMR_OCR_TIMEOUT_SECONDS", 30.0, float),
             # service_version 默认改成空字符串：与 Java 端 @DubboReference 默认 version="" 对齐。
             # Dubbo 3 接口级服务发现对非空 version 严格匹配（metadata + Nacos 服务名两层都得对），
             # 默认 "1.0.0" 会让 consumer 找不到 provider（consumer 默认 version=""）。
@@ -204,6 +207,8 @@ class OmrSettings(BaseSettings):
     nacos_enabled: bool = True
     nacos_server: str = "127.0.0.1:8848"
     nacos_namespace: str = "public"
+    nacos_username: str = ""
+    nacos_password: str = ""
     nacos_group: str = "DEFAULT_GROUP"
     nacos_data_id: str = "omr-service.yaml"
     nacos_service_name: str = "omr-service"
@@ -218,17 +223,26 @@ class OmrSettings(BaseSettings):
     redis_stream_job: str = "omr:batch:job"
     redis_stream_result: str = "omr:batch:result"
     redis_result_hash_prefix: str = "omr:batch:result:hash"
+    redis_consumer_group: str = "omr-service"
+    redis_consumer_name: str = "consumer-1"
 
     # 任务相关
     consumer_enabled: bool = True
     worker_pool_size: int = 4
     sync_timeout_seconds: float = 60.0
+    # MQ 单任务处理超时（秒）：PaddleOCR 首次初始化/识别可能较慢，放宽到 120s 避免 future 超时重复投递
+    consumer_task_timeout_sec: int = 120
+    # 个人信息 OCR / 主观题裁剪单步超时（秒）：超时跳过该步，不阻塞任务回写
+    ocr_timeout_seconds: float = 30.0
+    # 个人信息 OCR 置信度阈值：低于阈值视为未识别，置空 value（对齐旧 gRPC 分支）
+    ocr_confidence_threshold: float = 0.3
 
     # OMR 内部
     template_ttl_seconds: int = 3600
+    image_timeout: int = 30
     image_max_bytes: int = 50 * 1024 * 1024
     crop_output_dir: str = "./output"
-    crop_base_url: str = "http://127.0.0.1:8080/v1/omr_crops"
+    crop_base_url: str = ""
 
     # 兼容期
     legacy_dubbo_port: Optional[int] = None
@@ -240,7 +254,10 @@ class OmrSettings(BaseSettings):
 
 
 def load_settings() -> OmrSettings:
-    """入口: 实例化 OmrSettings. Nacos 合并在 main.py 中处理."""
+    """入口: 加载配置 (Nacos > .env > 默认值)."""
+    import logging
+    _log = logging.getLogger(__name__)
+
     settings = OmrSettings()
     # 兼容期: 旧 OMR_DUBBO_PORT / OMR_HEALTH_PORT 触发 warning
     if os.getenv("OMR_DUBBO_PORT"):
@@ -255,4 +272,16 @@ def load_settings() -> OmrSettings:
             DeprecationWarning,
             stacklevel=2,
         )
+
+    # 从 Nacos 配置中心拉取配置，覆盖 .env / 默认值
+    if settings.nacos_enabled:
+        try:
+            from omr_service.nacos_config import NacosConfigClient, apply_nacos_config
+            client = NacosConfigClient(settings)
+            nacos_raw = client.load()
+            if nacos_raw:
+                apply_nacos_config(settings, nacos_raw)
+        except Exception as e:
+            _log.warning("Nacos 配置拉取失败，使用本地配置: %s", e)
+
     return settings

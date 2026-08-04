@@ -1,4 +1,5 @@
 """模板缓存 — 内存存储解析后的模板上下文"""
+import copy
 import threading
 import time
 from dataclasses import dataclass, field
@@ -77,7 +78,8 @@ class TemplateStore:
         # 保留旧的 StandardTemplate 作为默认参考图（通常是 A 面），
         # 避免后页（B 面）调用覆盖默认参考图导致 A 面选择题 ECC 对齐失败。
         # 多页选择题支持后续再按 page_index 选择对应参考图。
-        merged_template = old.standard_template
+        # deep copy 避免修改共享缓存
+        merged_template = copy.deepcopy(old.standard_template)
         merged_template.bubbles = merged_bubbles
 
         # 合并多页参考图

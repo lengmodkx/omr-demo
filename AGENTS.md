@@ -59,8 +59,8 @@ python -m omr_service.main
 # 或直接用 uvicorn：
 # uvicorn omr_service.main:app --host 0.0.0.0 --port 8080
 
-# 运行测试
-python -m unittest discover -s omr_service/tests -p "test_*.py" -v
+# 运行测试（pytest，tests/ 目录；pytest.ini 已配置 testpaths = tests）
+python -m pytest -v
 
 # Docker 构建
 docker compose build

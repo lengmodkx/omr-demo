@@ -20,15 +20,15 @@ def e2e_app():
     service = MagicMock()
     service.template_store = MagicMock()
     service.recognize.return_value = {
-        "code": 0, "message": "ok", "template_id": "t-1",
+        "code": 0, "message": "ok", "template_id": 1,
         "answers": [], "abnormal": False, "empty_count": 0, "multiple_count": 0, "elapsed_ms": 10,
     }
     service.parse_golden_template.return_value = {
-        "code": 0, "message": "ok", "template_id": "t-1",
+        "code": 0, "message": "ok", "template_id": 1,
         "answers": [], "bubble_grid": [], "elapsed_ms": 10,
     }
     service.reverify_paper.return_value = {
-        "code": 0, "message": "ok", "template_id": "t-1",
+        "code": 0, "message": "ok", "template_id": 1,
         "answers": [], "abnormal": False, "empty_count": 0, "multiple_count": 0, "elapsed_ms": 10,
     }
     service.verify_recognition_rate.side_effect = Exception("not implemented")
@@ -76,7 +76,7 @@ def test_e2e_recognize_with_personal_info(e2e_app):
     r = e2e_app.post("/v1/recognize", json={
         "template_id": "t-1",
         "scan_image_urls": ["http://x.jpg"],
-        "personal_info_region": {"x": 0, "y": 0, "width": 100, "height": 50},
+        "personal_info_region": [{"field": "name", "x1": 0, "y1": 0, "x2": 100, "y2": 50}],
     })
     assert r.status_code == 200
     assert r.json()["code"] == 0

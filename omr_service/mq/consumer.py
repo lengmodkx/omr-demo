@@ -64,6 +64,12 @@ class MqConsumer:
         with self._inflight_lock:
             if self._inflight > 0:
                 logger.warning("停止时仍有 %d 个 inflight 任务未完成", self._inflight)
+        # 关闭 worker_pool
+        if hasattr(self, "worker_pool") and self.worker_pool is not None:
+            try:
+                self.worker_pool.close()
+            except Exception as e:
+                logger.warning("关闭 worker_pool 失败: %s", e)
         if self._client:
             try:
                 self._client.close()
@@ -239,27 +245,36 @@ class MqConsumer:
 def start_consumer_thread(
     service: OmrService,
     settings: Any,
-) -> threading.Thread:
+    template_store: Any = None,
+) -> MqConsumer:
     """启动 Redis Stream 消费者线程（FastAPI 启动入口调用）.
 
     Args:
         service: 已初始化的 OmrService 实例。
         settings: OmrSettings，包含 redis/consumer 相关配置。
+        template_store: 共享的 TemplateStore（避免与 HTTP 路径各自维护独立缓存）。
+                        None 时回退到新创建。
 
     Returns:
-        启动的 daemon Thread.
+        MqConsumer 实例，调用方通过 consumer.stop() 优雅关闭。
     """
-    template_store = TemplateStore(ttl_seconds=getattr(settings, "template_ttl_seconds", 300))
+    if template_store is None:
+        template_store = TemplateStore(ttl_seconds=getattr(settings, "template_ttl_seconds", 300))
     image_loader = ImageLoader(max_bytes=getattr(settings, "image_max_bytes", 10 * 1024 * 1024))
-    worker_pool = WorkerPool(size=getattr(settings, "worker_pool_size", 4))
+    worker_pool = WorkerPool(max_workers=getattr(settings, "worker_pool_size", 4))
 
     cfg = OmrConfig.from_env()
-    cfg.redis_job_stream = settings.redis_job_stream
+    cfg.redis_host = settings.redis_host
+    cfg.redis_port = settings.redis_port
+    cfg.redis_db = settings.redis_db
+    cfg.redis_password = settings.redis_password
+    cfg.redis_job_stream = settings.redis_stream_job
     cfg.redis_consumer_group = settings.redis_consumer_group
     cfg.redis_consumer_name = settings.redis_consumer_name
     cfg.omr_max_inflight = getattr(settings, "consumer_max_inflight", 8)
     cfg.omr_batch_size = getattr(settings, "consumer_batch_size", 4)
-    cfg.omr_single_task_timeout_sec = getattr(settings, "consumer_task_timeout_sec", 60)
+    cfg.omr_single_task_timeout_sec = getattr(settings, "consumer_task_timeout_sec", 120)
+    cfg.ocr_timeout_seconds = getattr(settings, "ocr_timeout_seconds", 30.0)
 
     consumer = MqConsumer(
         cfg=cfg,
@@ -273,4 +288,4 @@ def start_consumer_thread(
     consumer._worker_pool = worker_pool
     consumer._template_store = template_store
     consumer._image_loader = image_loader
-    return consumer._thread  # type: ignore[return-value]
+    return consumer

@@ -1,44 +1,69 @@
 from pydantic import BaseModel, Field
 
 from omr_service.api.schemas.common import BaseResponse, SubjectiveRegion
-from omr_service.api.schemas.enums import AnswerType
 
 
 class QuestionAnswer(BaseModel):
+    """单题答案结构（模板解析等场景使用）"""
     question_no: int
-    answer_type: AnswerType = AnswerType.SINGLE
+    answer: str = ""
+    status: str = "empty"
+    correct: bool | None = None
+
+
+class AnswerInfo(BaseModel):
+    """识别结果中单题答案（list 元素）"""
+    question_no: int
     selected: list[str] = Field(default_factory=list)
+    status: str = "empty"
     is_blank: bool = False
     is_multiple: bool = False
-    confidence: float | None = None
+    correct: bool | None = None
+
+
+class BubblePoint(BaseModel):
+    """气泡坐标（前端可视化用）"""
+    q: int
+    opt: str
+    x: int
+    y: int
+    w: int
+    h: int
+
+
+class PersonalInfoEntry(BaseModel):
+    """单条个人信息字段（personal_info list 元素）"""
+    field: str
+    value: str = ""
+    confidence: float = 0.0
+    parsed_fields: dict | None = None
 
 
 class RecognizeRequest(BaseModel):
-    template_id: str
+    """同步识别请求"""
+    template_id: str | int  # 兼容 Java 端发字符串
     scan_image_urls: list[str] = Field(min_length=1)
     question_no: int | None = None
-    personal_info_region: dict | None = None
+    personal_info_region: list | dict | None = None  # 接受 list[region] 或单个 dict
     subjective_regions: list[SubjectiveRegion] | None = None
 
 
-class PersonalInfo(BaseModel):
-    name: str | None = None
-    exam_id: str | None = None
-    raw_text: str | None = None
-
-
 class SubjectiveCrop(BaseModel):
-    region_id: str
-    url: str
-    width: int
-    height: int
+    """主观题裁剪结果（与 SubjectiveCropper.crop_subjective_regions 输出对齐）"""
+    q: int = 0
+    image_url: str = ""
+    page_index: int = 0
 
 
 class RecognizeResponse(BaseResponse):
-    template_id: str
-    answers: list[QuestionAnswer] = Field(default_factory=list)
+    """同步识别响应（与 OmrService.recognize 实际返回结构对齐）"""
+    template_id: int
+    answers: list[AnswerInfo] = Field(default_factory=list)
+    bubbles: list[BubblePoint] = Field(default_factory=list)
+    bubble_grid: list[BubblePoint] = Field(default_factory=list)
     empty_count: int = 0
     multiple_count: int = 0
     abnormal: bool = False
-    personal_info: PersonalInfo | None = None
-    subjective_crops: list[SubjectiveCrop] | None = None
+    personal_info: list[PersonalInfoEntry] = Field(default_factory=list)
+    subjective_crops: list[SubjectiveCrop] = Field(default_factory=list)
+    elapsed_ms: int = 0

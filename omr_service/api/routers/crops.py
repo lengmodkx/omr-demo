@@ -21,7 +21,9 @@ def get_crop(request: Request, file_path: str):
     target = (base / file_path).resolve()
 
     # 路径穿越检查
-    if not str(target).startswith(str(base)):
+    try:
+        target.relative_to(base)
+    except ValueError:
         raise HTTPException(status_code=400, detail="path traversal detected")
 
     if not target.is_file():

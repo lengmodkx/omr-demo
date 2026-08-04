@@ -38,6 +38,15 @@ class PersonalInfoOcr:
     _instance: Optional["PersonalInfoOcr"] = None
     _ocr_engine: Any = None
     _init_lock = threading.Lock()
+    # PaddleOCR 推理调用串行锁：Paddle 推理引擎不是线程安全的，
+    # 批量任务多 worker 并发调用 engine.ocr() 会偶发异常/返回空，导致个别答题卡个人信息识别为空
+    _ocr_call_lock = threading.Lock()
+    # 初始化进行中标记：PaddleOCR 初始化（import/模型加载）可能永久挂起，
+    # 若在持锁状态下挂起会导致后续所有调用卡在 _init_lock 上（每个任务泄漏一个线程+延迟超时）。
+    # 改为锁内只改标记、锁外执行初始化；标记为 True 时后续调用直接按不可用处理（秒回），不等待。
+    _init_in_progress: bool = False
+    # 初始化失败一次性标记：失败后不再重复尝试 import paddleocr（高频任务下避免噪音+开销）
+    _init_failed: bool = False
 
     def __new__(cls) -> "PersonalInfoOcr":
         if cls._instance is None:
@@ -47,26 +56,40 @@ class PersonalInfoOcr:
         return cls._instance
 
     def _get_engine(self) -> Any:
-        """懒加载 PaddleOCR 引擎，初始化失败时返回 None 并记录日志（线程安全）"""
+        """懒加载 PaddleOCR 引擎，初始化失败/挂起时返回 None 并记录日志（线程安全）
+
+        注意：初始化在锁外执行；若初始化线程挂起（import/模型加载卡死），
+        后续调用通过 _init_in_progress 标记直接返回 None，不阻塞任务主流程。
+        """
         if self._ocr_engine is not None:
             return self._ocr_engine
+        if self._init_failed:
+            return None
         with self._init_lock:
             # 双重检查，防止多个线程重复初始化
             if self._ocr_engine is not None:
                 return self._ocr_engine
-            try:
-                from paddleocr import PaddleOCR
+            if self._init_in_progress:
+                logger.warning("PaddleOCR 初始化进行中(可能挂起)，本次跳过个人信息 OCR")
+                return None
+            self._init_in_progress = True
+        try:
+            from paddleocr import PaddleOCR
 
-                self._ocr_engine = PaddleOCR(
-                    use_angle_cls=True,
-                    lang="ch",
-                    show_log=False,
-                    enable_mkldnn=False,
-                )
-                logger.info("PaddleOCR 初始化成功")
-            except Exception as e:
-                logger.warning("PaddleOCR 初始化失败，个人信息 OCR 将不可用: %s", e)
-                self._ocr_engine = None
+            self._ocr_engine = PaddleOCR(
+                use_angle_cls=True,
+                lang="ch",
+                show_log=False,
+                enable_mkldnn=False,
+            )
+            logger.info("PaddleOCR 初始化成功")
+        except Exception as e:
+            logger.warning("PaddleOCR 初始化失败，个人信息 OCR 将不可用: %s", e)
+            self._ocr_engine = None
+            self._init_failed = True
+        finally:
+            # 非挂起路径（正常/异常）复位标记；挂起时保持 True，避免后续重复尝试
+            self._init_in_progress = False
         return self._ocr_engine
 
     def recognize(
@@ -184,7 +207,9 @@ class PersonalInfoOcr:
     def _recognize_one(engine: Any, image: np.ndarray) -> tuple[str, float]:
         """单张图片 OCR，返回 (文本, 平均置信度)"""
         try:
-            result = engine.ocr(image, cls=True)
+            # Paddle 推理非线程安全，串行化调用
+            with PersonalInfoOcr._ocr_call_lock:
+                result = engine.ocr(image, cls=True)
         except Exception as e:
             logger.warning("OCR 识别异常: %s", e)
             return "", 0.0
@@ -230,7 +255,9 @@ class PersonalInfoOcr:
 
         preprocessed = self._preprocess(crop)
         try:
-            result = engine.ocr(preprocessed, cls=True)
+            # Paddle 推理非线程安全，串行化调用
+            with PersonalInfoOcr._ocr_call_lock:
+                result = engine.ocr(preprocessed, cls=True)
         except Exception as e:
             logger.warning("考生信息区 OCR 异常: %s", e)
             return {"raw_text": "", "confidence": 0.0}

@@ -5,7 +5,14 @@ from omr_service.nacos_v2_compat import import_client_config, import_naming_serv
 async def main():
     ClientConfig = import_client_config()
     NacosNamingService = import_naming_service()
-    cc = ClientConfig(server_addresses='39.153.154.183:8848', namespace_id='8c4541fd-870e-414d-bdee-72cab49fe8d2', username='nacos', password='lemon2judy', log_level=30)
+    import os
+    cc = ClientConfig(
+        server_addresses=os.getenv('NACOS_SERVER_ADDR', ''),
+        namespace_id=os.getenv('NACOS_NAMESPACE', 'public'),
+        username=os.getenv('NACOS_USERNAME', ''),
+        password=os.getenv('NACOS_PASSWORD', ''),
+        log_level=30,
+    )
     svc = await NacosNamingService.create_naming_service(cc)
     try:
         for sn in ['providers:omr.OmrService::', 'omr-service']:

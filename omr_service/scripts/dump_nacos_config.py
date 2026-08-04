@@ -17,34 +17,32 @@ if __package__ in (None, ""):
     _SCREENIMG = os.path.dirname(os.path.dirname(os.path.dirname(_HERE)))
     if _SCREENIMG not in sys.path:
         sys.path.insert(0, _SCREENIMG)
-    from omr_service.config import OmrConfig
+    from omr_service.config import load_settings
     from omr_service.nacos_config import NacosConfigClient
 else:
-    from ..config import OmrConfig
+    from ..config import load_settings
     from ..nacos_config import NacosConfigClient
 
 
 def main() -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
-    cfg = OmrConfig.from_env()
+    settings = load_settings()
     print("=" * 72)
-    print("OmrConfig（来自 .env / 环境变量 / Nacos 配置中心合并后的最终值）")
+    print("OmrSettings（来自 .env / 环境变量 / Nacos 配置中心合并后的最终值）")
     print("=" * 72)
-    print(f"  nacos_server             = {cfg.nacos_server}")
-    print(f"  nacos_namespace          = {cfg.nacos_namespace}")
-    print(f"  nacos_group_name         = {cfg.nacos_group_name}")
-    print(f"  nacos_service_name       = {cfg.nacos_service_name}")
-    print(f"  service_version          = {cfg.service_version!r}   ← 期望空串")
-    print(f"  nacos_config_data_id     = {cfg.nacos_config_data_id}")
-    print(f"  nacos_config_group       = {cfg.nacos_config_group}")
+    print(f"  nacos_server             = {settings.nacos_server}")
+    print(f"  nacos_namespace          = {settings.nacos_namespace}")
+    print(f"  nacos_group              = {settings.nacos_group}")
+    print(f"  nacos_service_name       = {settings.nacos_service_name}")
+    print(f"  nacos_data_id            = {settings.nacos_data_id}")
     print()
 
     # 直接拉 Nacos 配置中心的原始内容
     print("=" * 72)
-    print(f"Nacos 配置中心原始内容：{cfg.nacos_config_data_id} @ group={cfg.nacos_config_group} namespace={cfg.nacos_namespace}")
+    print(f"Nacos 配置中心原始内容：{settings.nacos_data_id} @ group={settings.nacos_group} namespace={settings.nacos_namespace}")
     print("=" * 72)
-    client = NacosConfigClient(cfg)
+    client = NacosConfigClient(settings)
     try:
         content = client.load()
         print(content if isinstance(content, str) else json.dumps(content, ensure_ascii=False, indent=2))

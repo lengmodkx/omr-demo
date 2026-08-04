@@ -33,10 +33,12 @@ def test_recognize_request_missing_template_id_fails():
         RecognizeRequest(scan_image_urls=["http://x/y.jpg"])
 
 
-def test_question_answer_default_answer_type():
-    a = QuestionAnswer(question_no=1, selected=["A"])
-    assert a.answer_type == AnswerType.SINGLE
-    assert a.is_blank is False
+def test_question_answer_fields():
+    """QuestionAnswer 新结构：question_no/answer/status/correct"""
+    a = QuestionAnswer(question_no=1, answer="A")
+    assert a.answer == "A"
+    assert a.status == "empty"
+    assert a.correct is None
 
 
 def test_column_config_default_options():

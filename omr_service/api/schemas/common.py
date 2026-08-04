@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class Region(BaseModel):
@@ -8,8 +8,21 @@ class Region(BaseModel):
     height: int
 
 
-class SubjectiveRegion(Region):
-    region_id: str
+class SubjectiveRegion(BaseModel):
+    """主观题区域（与 Java 端 OmrPayloadBuilder.buildSubjectiveRegions 对齐）.
+
+    Java 发送 camelCase (pageIndex/stitchWithNext)，服务内部统一 snake_case。
+    """
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    q: int = 0
+    x1: int = 0
+    y1: int = 0
+    x2: int = 0
+    y2: int = 0
+    page_index: int = Field(default=0, alias="pageIndex")
+    stitch_with_next: bool = Field(default=False, alias="stitchWithNext")
 
 
 class ErrorResponse(BaseModel):

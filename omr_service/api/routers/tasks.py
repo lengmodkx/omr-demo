@@ -50,10 +50,13 @@ def create_task(request: Request, body: CreateTaskRequest):
 
     _validate_payload(body.task_type.value, body.payload)
 
+    # 防止 payload 覆盖预定义的 task_id / job_type
+    safe_payload = {k: v for k, v in body.payload.items() if k not in ("task_id", "job_type")}
+
     # 复用现有 mq.producer
     enqueue_job(
         task_type=body.task_type.value,
-        payload=body.payload,
+        payload=safe_payload,
         task_id=task_id,
     )
 

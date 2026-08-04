@@ -10,6 +10,8 @@
 """
 from __future__ import annotations
 
+from urllib.parse import urlparse
+
 
 class OmrError(Exception):
     """所有 OMR 业务异常的基类."""
@@ -34,7 +36,10 @@ class ImageLoadError(OmrError):
     code = 5
 
     def __init__(self, url: str, reason: str):
-        super().__init__(f"图片加载失败: {url} ({reason})")
+        # 去除 query string 避免日志泄露签名 token
+        parsed = urlparse(url)
+        safe_url = parsed._replace(query="").geturl() if parsed.scheme else url
+        super().__init__(f"图片加载失败: {safe_url} ({reason})")
 
 
 class InvalidRequestError(OmrError):

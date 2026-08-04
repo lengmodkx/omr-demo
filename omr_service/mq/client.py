@@ -1,12 +1,53 @@
 """Redis 连接管理"""
+from __future__ import annotations
+
 import logging
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 import redis
 
 from omr_service.config import OmrConfig
 
+if TYPE_CHECKING:
+    from omr_service.config import OmrSettings
+
 logger = logging.getLogger(__name__)
+
+
+def get_redis_client(settings: "OmrSettings | None" = None) -> redis.Redis:
+    """返回已连接的 Redis 客户端.
+
+    Args:
+        settings: OmrSettings 实例；为 None 时回退到 OmrConfig.from_env().
+    """
+    if settings is not None:
+        client = redis.Redis(
+            host=settings.redis_host,
+            port=settings.redis_port,
+            password=settings.redis_password or None,
+            db=settings.redis_db,
+            decode_responses=True,
+            socket_connect_timeout=10,
+            socket_timeout=10,
+        )
+    else:
+        cfg = OmrConfig.from_env()
+        client = redis.Redis(
+            host=cfg.redis_host,
+            port=cfg.redis_port,
+            password=cfg.redis_password,
+            db=cfg.redis_db,
+            decode_responses=True,
+            socket_connect_timeout=cfg.redis_timeout,
+            socket_timeout=cfg.redis_timeout,
+            ssl=cfg.redis_ssl,
+        )
+    client.ping()
+    logger.info("Redis 连接成功: %s:%s/%s",
+                client.connection_pool.connection_kwargs.get("host"),
+                client.connection_pool.connection_kwargs.get("port"),
+                client.connection_pool.connection_kwargs.get("db"))
+    return client
 
 
 class MqClient:
