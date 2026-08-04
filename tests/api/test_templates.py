@@ -23,7 +23,7 @@ def app():
 def test_parse_template_200(app):
     _, service = app
     service.parse_golden_template.return_value = {
-        "code": 0, "message": "ok", "template_id": "t-1",
+        "code": 0, "message": "ok", "template_id": 1,
         "answers": [], "bubble_grid": [], "elapsed_ms": 100,
     }
     c = TestClient(app[0])
@@ -36,15 +36,21 @@ def test_parse_template_200(app):
     assert r.json()["code"] == 0
 
 
-def test_parse_template_400_empty_columns(app):
+def test_parse_template_200_empty_columns(app):
+    """空 columns 合法：多页模板中只有个人信息/主观题的页没有选择题列"""
+    _, service = app
+    service.parse_golden_template.return_value = {
+        "code": 0, "message": "ok", "template_id": 1,
+        "answers": [], "bubble_grid": [], "elapsed_ms": 100,
+    }
     c = TestClient(app[0])
     r = c.post("/v1/templates/parse", json={
         "template_id": "t-1",
         "template_image_url": "http://x/tpl.jpg",
         "columns": [],
     })
-    assert r.status_code == 400
-    assert r.json()["code"] == 6
+    assert r.status_code == 200
+    assert r.json()["code"] == 0
 
 
 def test_verify_recognition_rate_500(app):
@@ -58,7 +64,7 @@ def test_verify_recognition_rate_500(app):
 
 def test_reverify_paper_delegates(app):
     _, service = app
-    service.reverify_paper.return_value = {"code": 0, "message": "ok", "template_id": "t-1", "answers": [], "abnormal": False, "empty_count": 0, "multiple_count": 0, "elapsed_ms": 50}
+    service.reverify_paper.return_value = {"code": 0, "message": "ok", "template_id": 1, "answers": [], "abnormal": False, "empty_count": 0, "multiple_count": 0, "elapsed_ms": 50}
     c = TestClient(app[0])
     r = c.post("/v1/reverify_paper", json={
         "template_id": "t-1",

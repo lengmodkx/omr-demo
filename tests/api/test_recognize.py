@@ -26,7 +26,7 @@ def app():
 def test_recognize_200(app):
     _, service = app
     service.recognize.return_value = {
-        "code": 0, "message": "ok", "template_id": "t-1",
+        "code": 0, "message": "ok", "template_id": 1,
         "answers": [{"question_no": 1, "selected": ["A"], "answer_type": "single", "is_blank": False, "is_multiple": False}],
         "abnormal": False, "empty_count": 0, "multiple_count": 0, "elapsed_ms": 123,
     }

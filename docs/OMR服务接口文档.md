@@ -59,7 +59,7 @@ String url = "http://omr-service:8080/v1/recognize";
 |------|------|------|------|
 | `template_id` | int64 | 是 | 模板唯一标识，后续识别复用 |
 | `template_image_url` | string | 是 | 模板图片 URL（PNG/JPG） |
-| `columns` | ColumnConfig[] | 是 | 列框配置列表，至少一个 |
+| `columns` | ColumnConfig[] | 否 | 列框配置列表；多页模板中只有个人信息/主观题的页可以为空 |
 
 `ColumnConfig`：
 
@@ -211,7 +211,7 @@ String url = "http://omr-service:8080/v1/recognize";
 | `0` | 成功 | - |
 | `4` | 模板未找到 | `template_id` 未调用 `/v1/templates/parse` 解析 |
 | `5` | 图片加载失败 | URL 无效、OSS 权限、图片过大/损坏 |
-| `6` | 请求参数非法 | `template_id` 为 0、URL 为空、`columns` 为空等 |
+| `6` | 请求参数非法 | `template_id` 为 0、URL 为空等 |
 | `99` | 内部错误 | 识别异常，需查看服务端日志 |
 
 HTTP 层（FastAPI 默认行为）：

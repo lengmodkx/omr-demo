@@ -17,7 +17,7 @@ install: venv
 	.venv/Scripts/pip install -r requirements.txt
 
 test:
-	.venv/Scripts/python -m unittest discover -s omr_service/tests -p "test_*.py" -v
+	.venv/Scripts/python -m pytest -v
 
 proto:
 	bash omr_service/scripts/gen_proto.sh

@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+*.pyo
+__pycache__.cpython*
+.env
+*.egg-info/
+dist/
+build/
+output/
+omr_crops/

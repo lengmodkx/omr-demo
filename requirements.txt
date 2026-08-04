@@ -1,8 +1,8 @@
-# OMR Python 服务依赖
-# 注意：PaddleOCR 在 Windows CPU 上的稳定组合为
-#   Python 3.11 + paddlepaddle==2.6.2 + paddleocr==2.7.3 + numpy==1.26.4 + protobuf==3.20.2
-# nacos-sdk-python 3.2.0 生成的 gRPC pb 需要 protobuf 5.x 的 runtime_version，
-# 与 PaddlePaddle 冲突。安装后请运行一次：
+# OMR Python Service Dependencies
+#
+# Windows install guide (see README.md for details):
+#   pip install -r requirements.txt
+#   pip install --no-deps -r requirements-nacos.txt
 #   python scripts/patch_nacos_protobuf.py
 
 opencv-python-headless>=4.8
@@ -12,24 +12,23 @@ pyzbar>=0.1.9
 Pillow>=10.0,<11
 openpyxl>=3.1
 grpcio>=1.60.0
-grpcio-tools>=1.60.0
 redis>=5.0.0
 pyyaml>=6.0
 python-dotenv>=1.0.0
 requests>=2.31.0
 tenacity>=8.0.0
-nacos-sdk-python==3.2.0
 pydantic>=2.10.4
 paddlepaddle==2.6.2
 paddleocr==2.7.3
 protobuf==3.20.2
 streamlit-drawable-canvas>=0.9
 
-# FastAPI 改造 P0
+# FastAPI migration P0
 fastapi>=0.115.0
 uvicorn[standard]>=0.32.0
 pydantic-settings>=2.6.0
-# 测试
+
+# Tests
 pytest>=8.0.0
 pytest-asyncio>=0.24.0
 pytest-cov>=6.0.0

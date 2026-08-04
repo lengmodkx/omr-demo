@@ -44,6 +44,8 @@ class NacosRegistrator:
         return ClientConfig(
             server_addresses=self.settings.nacos_server,
             namespace_id=self.settings.nacos_namespace or "public",
+            username=self.settings.nacos_username or None,
+            password=self.settings.nacos_password or None,
             log_level=logging.INFO,
         )
 

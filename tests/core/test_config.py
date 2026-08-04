@@ -1,7 +1,9 @@
 from omr_service.config import OmrSettings
 
 
-def test_default_http_port():
+def test_default_http_port(monkeypatch):
+    # 防止本机环境变量（如开发机设置了 OMR_HTTP_PORT=9501）干扰默认值断言
+    monkeypatch.delenv("OMR_HTTP_PORT", raising=False)
     s = OmrSettings(_env_file=None)
     assert s.http_port == 8080
 

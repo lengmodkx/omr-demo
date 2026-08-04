@@ -4,12 +4,13 @@ Phase 4 (FastAPI 改造): 通过 OmrService（dict-based，与协议无关）调
 """
 import logging
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
 from omr_service.config import OmrConfig
-from omr_service.core.service import OmrService
+from omr_service.core.exceptions import ImageLoadError
+from omr_service.core.service import OmrService, run_with_timeout
 from omr_service.engine.cropper import SubjectiveCropper
 from omr_service.engine.ocr import PersonalInfoOcr
 from omr_service.engine.personal_info_block_parser import parse_personal_info_block
@@ -22,6 +23,65 @@ from omr_service.worker.pool import WorkerPool
 STUDENT_INFO_BLOCK_FIELD = "student_info_block"
 
 logger = logging.getLogger(__name__)
+
+
+def _as_int(value, default: int = 0) -> int:
+    """int() 安全包装：None/空字符串/非数字回退默认值，避免 int(None) 抛 TypeError."""
+    if value is None:
+        return default
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _as_bool(value, default: bool = False) -> bool:
+    """布尔安全转换：字符串 "false"/"0" 不误判为 True."""
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in ("1", "true", "yes", "on")
+    return bool(value)
+
+
+def _normalize_personal_info(regions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Java 端 camelCase 字段(pageIndex) → Python snake_case(page_index)，对齐旧分支 proto 转换.
+
+    旧分支通过 _personal_info_from_proto 显式转换；FastAPI 分支的 _build_parse_request
+    此前原样透传，导致 page_index 永远取默认值 0（多页模板时错页）。
+    """
+    out: List[Dict[str, Any]] = []
+    for r in regions or []:
+        out.append({
+            "field": r.get("field", ""),
+            "x1": _as_int(r.get("x1")),
+            "y1": _as_int(r.get("y1")),
+            "x2": _as_int(r.get("x2")),
+            "y2": _as_int(r.get("y2")),
+            "page_index": _as_int(r.get("pageIndex") if r.get("pageIndex") is not None else r.get("page_index")),
+        })
+    return out
+
+
+def _normalize_subjective_regions(regions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Java 端 camelCase 字段(pageIndex/stitchWithNext) → Python snake_case.
+
+    对齐旧分支 _subjective_region_from_proto 的转换；缺失时 page_index=0、stitch_with_next=False。
+    """
+    out: List[Dict[str, Any]] = []
+    for r in regions or []:
+        out.append({
+            "q": _as_int(r.get("q")),
+            "x1": _as_int(r.get("x1")),
+            "y1": _as_int(r.get("y1")),
+            "x2": _as_int(r.get("x2")),
+            "y2": _as_int(r.get("y2")),
+            "page_index": _as_int(r.get("pageIndex") if r.get("pageIndex") is not None else r.get("page_index")),
+            "stitch_with_next": _as_bool(r.get("stitchWithNext") if r.get("stitchWithNext") is not None else r.get("stitch_with_next")),
+        })
+    return out
 
 
 class BatchJobHandler:
@@ -91,13 +151,23 @@ class BatchJobHandler:
 
             personal_info: List[Dict[str, Any]] = []
             if cached.personal_info:
-                personal_info = self._recognize_personal_info(images, cached.personal_info)
+                personal_info = run_with_timeout(
+                    lambda: self._recognize_personal_info(images, cached.personal_info),
+                    self.cfg.ocr_timeout_seconds,
+                    "个人信息OCR",
+                    [],
+                )
 
             subjective_crops: List[Dict[str, Any]] = []
             if cached.subjective_regions:
                 namespace = f"task_{task_id or int(time.time() * 1000)}"
-                subjective_crops = self._cropper.crop_subjective_regions(
-                    images, cached.subjective_regions, namespace=namespace
+                subjective_crops = run_with_timeout(
+                    lambda: self._cropper.crop_subjective_regions(
+                        images, cached.subjective_regions, namespace=namespace
+                    ),
+                    self.cfg.ocr_timeout_seconds,
+                    "主观题裁剪",
+                    [],
                 )
 
             return {
@@ -186,6 +256,7 @@ class BatchJobHandler:
                     "value": raw_text,
                     "confidence": conf,
                 }
+                # 解析出的子字段平铺追加到结果列表（对齐旧 gRPC 分支，Java 端按 field 平铺读取）
                 for k, v in fields.items():
                     if k == "raw_text":
                         continue
@@ -336,21 +407,30 @@ class BatchJobHandler:
         merged_personal_info: List[Dict[str, Any]] = []
         merged_subjective_crops: List[Dict[str, Any]] = []
         total = 0
+        page_errors: List[str] = []
 
         for page in pages:
+            page_index = page.get("page_index", page.get("pageIndex", 0))
             request = self._build_parse_request(template_id, page)
             try:
                 resp_dict = self.service.parse_golden_template(request)
+            except ImageLoadError as exc:
+                # 图片加载失败是永久性错误，重试无意义，直接失败
+                logger.error("[mq] 黄金模板解析图片加载失败 page=%s: %s", page_index, exc)
+                return {"code": 5, "message": f"第{page_index + 1}页: {exc}"}
             except Exception as exc:
-                logger.exception("[mq] 黄金模板解析异常 page=%s", page.get("page_index"))
-                return {"code": 99, "message": str(exc)}
+                logger.exception("[mq] 黄金模板解析异常 page=%s", page_index)
+                page_errors.append(f"第{page_index + 1}页: {exc}")
+                continue
 
             code = resp_dict.get("code", -1)
             if code != 0:
-                return {
-                    "code": code,
-                    "message": resp_dict.get("message", "第 {} 页黄金模板解析失败".format(page.get("page_index", 0) + 1)),
-                }
+                msg = f"第{page_index + 1}页: {resp_dict.get('message', '解析失败')}"
+                # 永久性错误（模板不存在/图片加载失败/请求无效）直接中止，不进入重试
+                if code in (4, 5, 6):
+                    return {"code": code, "message": msg}
+                page_errors.append(msg)
+                continue
 
             page_answers = resp_dict.get("answers", []) or []
             # 新 OmrService 返回 list；旧协议可能返回 dict。统一合并为 dict。
@@ -368,10 +448,16 @@ class BatchJobHandler:
                 merged_bubbles.append(b)
             personal_info_sample = resp_dict.get("personal_info_sample")
             if personal_info_sample is not None:
-                merged_personal_info.append(personal_info_sample)
+                if isinstance(personal_info_sample, list):
+                    merged_personal_info.extend(personal_info_sample)
+                elif isinstance(personal_info_sample, dict):
+                    merged_personal_info.append(personal_info_sample)
             subjective_crops = resp_dict.get("subjective_crops") or []
             merged_subjective_crops.extend(subjective_crops)
             total += len(page_answers) if isinstance(page_answers, list) else len(page_answers)
+
+        if page_errors and total == 0:
+            return {"code": 99, "message": "; ".join(page_errors)}
 
         return {
             "code": 0,
@@ -389,30 +475,48 @@ class BatchJobHandler:
 
     @staticmethod
     def _build_parse_request(template_id: int, page: Dict[str, Any]) -> Dict[str, Any]:
-        """将 MQ 任务的 page 信息转换为 OmrService.parse_golden_template 的输入 dict."""
+        """将 MQ 任务的 page 信息转换为 OmrService.parse_golden_template 的输入 dict.
+
+        Java 端字段为 camelCase (startQ/numQ/numOptions), StandardTemplate 期望 snake_case
+        (start_q/num_q/num_options). 此处做映射转换.
+        """
         columns_raw = page.get("columns", []) or []
         columns: List[Dict[str, Any]] = []
-        for idx, c in enumerate(columns_raw):
-            # 兼容两层入参：MQ 旧字段名 (x1/y1/x2/y2/startQ/numQ/numOptions)
-            # 与 OmrService 期望字段 (column_id/column_index/question_start/question_count/options_per_question)
-            columns.append({
-                "column_id": c.get("column_id") or c.get("id") or f"col_{idx}",
-                "column_index": int(c.get("column_index", idx)),
-                "question_start": int(c.get("question_start", c.get("startQ", c.get("start_q", 1)))),
-                "question_count": int(c.get("question_count", c.get("numQ", c.get("num_q", 0)))),
-                "options_per_question": int(c.get("options_per_question", c.get("numOptions", c.get("num_options", 4)))),
-                "question_type": c.get("question_type", "single"),
-            })
+        for c in columns_raw:
+            cols = {
+                "x1": int(c.get("x1", 0)),
+                "y1": int(c.get("y1", 0)),
+                "x2": int(c.get("x2", 0)),
+                "y2": int(c.get("y2", 0)),
+                "start_q": int(c.get("startQ", c.get("start_q", 1))),
+                "num_q": int(c.get("numQ", c.get("num_q", 0))),
+                "num_options": int(c.get("numOptions", c.get("num_options", 4))),
+                "option_axis": c.get("optionAxis", c.get("option_axis", "x")),
+                "reverse_q": c.get("reverseQ", c.get("reverse_q", False)),
+                "page_index": int(c.get("pageIndex", c.get("page_index", 0))),
+            }
+            logger.debug("[mq] column: x1=%s y1=%s x2=%s y2=%s startQ=%s numQ=%s numOpt=%s",
+                         cols["x1"], cols["y1"], cols["x2"], cols["y2"],
+                         cols["start_q"], cols["num_q"], cols["num_options"])
+            columns.append(cols)
 
         request: Dict[str, Any] = {
             "template_id": template_id,
             "template_image_url": page.get("template_image_url") or page.get("templateImageUrl"),
             "columns": columns,
+            # 传入页码供模板缓存 page_images 使用真实页码作为键
+            "page_index": _as_int(page.get("page_index") if page.get("page_index") is not None else page.get("pageIndex")),
         }
-        if page.get("personal_info_region"):
-            request["personal_info_region"] = page["personal_info_region"]
-        if page.get("subjective_regions"):
-            request["subjective_regions"] = page["subjective_regions"]
+        # personalInfo / subjectiveRegions 来自 Java 端
+        pi = page.get("personalInfo")
+        sr = page.get("subjectiveRegions")
+        logger.info("[mq] 模板解析请求: template_id=%s image=%s columns=%d personalInfo=%s subjectiveRegions=%s",
+                    template_id, request["template_image_url"], len(columns),
+                    "yes" if pi else "no", "yes" if sr else "no")
+        if pi:
+            request["personal_info_region"] = _normalize_personal_info(pi)
+        if sr:
+            request["subjective_regions"] = _normalize_subjective_regions(sr)
         return request
 
     def _build_parse_success_payload(

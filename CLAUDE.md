@@ -26,8 +26,8 @@ python -m omr_service.main
 # Regenerate API schemas is not required — FastAPI derives them from Pydantic models
 # under omr_service/api/schemas/ at startup.
 
-# Run tests
-python -m unittest discover -s omr_service/tests -p "test_*.py" -v
+# Run tests (pytest; tests/ directory per pytest.ini testpaths)
+python -m pytest -v
 
 # Docker
 docker compose build
@@ -105,4 +105,4 @@ Template coordinates are based on reference image dimensions and scaled at runti
 1. Define a Pydantic request/response model under `omr_service/api/schemas/`.
 2. Add a handler function to the appropriate router in `omr_service/api/routers/`.
 3. If the router does not exist yet, create it and include it in `omr_service/api/app.py`.
-4. Add a test under `omr_service/tests/` using FastAPI's `TestClient`.
+4. Add a test under `tests/` (e.g. `tests/api/`) using FastAPI's `TestClient`.

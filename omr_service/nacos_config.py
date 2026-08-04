@@ -3,11 +3,10 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, Optional, TYPE_CHECKING
 
 import yaml
 
-from omr_service.config import OmrConfig
 from omr_service.nacos_v2_compat import (
     import_client_config,
     import_config_param,
@@ -15,7 +14,28 @@ from omr_service.nacos_v2_compat import (
     shared_loop,
 )
 
+if TYPE_CHECKING:
+    from omr_service.config import OmrSettings
+
 logger = logging.getLogger(__name__)
+
+# Nacos YAML 扁平化后的 key → OmrSettings 字段名 映射
+_NACOS_KEY_MAP: Dict[str, str] = {
+    "redis.host": "redis_host",
+    "redis.port": "redis_port",
+    "redis.password": "redis_password",
+    "redis.db": "redis_db",
+    "redis.job_stream": "redis_stream_job",
+    "redis.result_stream": "redis_stream_result",
+    "redis.consumer_group": "redis_consumer_group",
+    "omr_worker_count": "worker_pool_size",
+    "omr_max_image_bytes": "image_max_bytes",
+    "omr_image_timeout": "image_timeout",
+    "nacos_group_name": "nacos_group",
+    "crop_output_dir": "crop_output_dir",
+    "crop_base_url": "crop_base_url",
+    "sync_timeout_seconds": "sync_timeout_seconds",
+}
 
 
 def _parse_content(content: str, data_type: str) -> Dict[str, Any]:
@@ -61,6 +81,32 @@ def flatten_dict(d: Dict[str, Any], parent_key: str = "", sep: str = ".") -> Dic
     return dict(items)
 
 
+def apply_nacos_config(settings: "OmrSettings", nacos_raw: Dict[str, Any]) -> None:
+    """将 Nacos 拉取的 YAML 配置平铺后写入 OmrSettings 实例.
+
+    Nacos 配置优先级高于 .env / 默认值（直接覆盖 settings 上的字段）。
+    """
+    flat = flatten_dict(nacos_raw)
+    updated = 0
+    for flat_key, value in flat.items():
+        field = _NACOS_KEY_MAP.get(flat_key, flat_key)
+        if hasattr(settings, field):
+            try:
+                # 类型转换：OmrSettings 字段声明的类型
+                current = getattr(settings, field)
+                if isinstance(current, bool):
+                    value = str(value).lower() in ("true", "1", "yes")
+                elif isinstance(current, int):
+                    value = int(value)
+                elif isinstance(current, float):
+                    value = float(value)
+                setattr(settings, field, value)
+                updated += 1
+            except (ValueError, TypeError):
+                logger.warning("Nacos 配置值类型转换失败: %s=%s", field, value)
+    logger.info("Nacos 配置已应用到 OmrSettings: %d 项", updated)
+
+
 class NacosConfigClient:
     """Nacos 配置中心客户端（gRPC 协议）。
 
@@ -69,10 +115,10 @@ class NacosConfigClient:
     - 服务端推送的配置变更监听
     """
 
-    def __init__(self, cfg: OmrConfig):
-        self.cfg = cfg
-        self._data_id = cfg.nacos_config_data_id
-        self._group = cfg.nacos_config_group
+    def __init__(self, settings: "OmrSettings"):
+        self.settings = settings
+        self._data_id = settings.nacos_data_id
+        self._group = settings.nacos_group
         self._config_service: Optional = None
         self._loop = shared_loop()
         self._on_change_callbacks: list = []
@@ -80,10 +126,10 @@ class NacosConfigClient:
     def _make_client_config(self):
         ClientConfig = import_client_config()
         return ClientConfig(
-            server_addresses=self.cfg.nacos_server,
-            namespace_id=self.cfg.nacos_namespace or "public",
-            username=self.cfg.nacos_username or "",
-            password=self.cfg.nacos_password or "",
+            server_addresses=self.settings.nacos_server,
+            namespace_id=self.settings.nacos_namespace or "public",
+            username=self.settings.nacos_username or None,
+            password=self.settings.nacos_password or None,
             log_level=logging.INFO,
         )
 

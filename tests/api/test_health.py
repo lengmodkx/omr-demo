@@ -13,6 +13,7 @@ def app():
     app.include_router(router)
     settings = MagicMock()
     settings.sync_timeout_seconds = 60.0
+    settings.redis_enabled = False  # 单测环境无 Redis，关闭就绪检查中的 Redis 探测
     service = MagicMock()
     register_dependencies(app, settings=settings, service=service, task_registry=MagicMock())
     return app

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import uuid
 from typing import TYPE_CHECKING
 
@@ -30,6 +31,7 @@ def create_app(
     settings: "OmrSettings",
     service: "OmrService",
     task_registry: "TaskRegistry",
+    lifespan=None,
 ) -> FastAPI:
     """创建 FastAPI 应用实例.
 
@@ -40,12 +42,19 @@ def create_app(
         version="2.0.0",
         openapi_url="/v1/openapi.json",
         docs_url="/v1/docs",
+        lifespan=lifespan,
     )
+
+    _REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9_\-]{1,64}$")
 
     # request_id middleware
     @app.middleware("http")
     async def request_id_middleware(request: Request, call_next):
-        rid = request.headers.get("X-Request-ID") or str(uuid.uuid4())
+        header_val = request.headers.get("X-Request-ID", "")
+        if _REQUEST_ID_RE.match(header_val):
+            rid = header_val
+        else:
+            rid = str(uuid.uuid4())
         request.state.request_id = rid
         response = await call_next(request)
         response.headers["X-Request-ID"] = rid

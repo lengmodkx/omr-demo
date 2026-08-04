@@ -112,9 +112,7 @@ class TestNacosConfigClient(unittest.TestCase):
         mock_cfg_cls,
         mock_config_service_cls,
     ):
-        from omr_service.config import OmrConfig
-
-        cfg = OmrConfig.from_env()
+        settings = OmrSettings(_env_file=None)
         mock_config_param.return_value = _SimpleParam
 
         mock_service = MagicMock()
@@ -126,7 +124,7 @@ class TestNacosConfigClient(unittest.TestCase):
         mock_loop.run = MagicMock(side_effect=lambda coro: asyncio.run(coro))
         mock_shared_loop.return_value = mock_loop
 
-        client = NacosConfigClient(cfg)
+        client = NacosConfigClient(settings)
         result = client.load()
         self.assertEqual(result["key"], "value")
 

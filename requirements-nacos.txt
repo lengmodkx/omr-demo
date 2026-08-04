@@ -1,0 +1,4 @@
+# nacos-sdk-python requires protobuf>=3.20.3, but paddlepaddle on Windows
+# requires protobuf<=3.20.2. Install this with --no-deps to skip the check.
+# After install, run: python scripts/patch_nacos_protobuf.py
+nacos-sdk-python==3.2.0
